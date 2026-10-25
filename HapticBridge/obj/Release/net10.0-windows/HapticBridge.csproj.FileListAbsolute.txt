@@ -1,0 +1,14 @@
+D:\Ingenieria\Proyecto Unity\AR Quest\HapticBridge\bin\Release\net10.0-windows\HapticBridge.exe
+D:\Ingenieria\Proyecto Unity\AR Quest\HapticBridge\bin\Release\net10.0-windows\HapticBridge.deps.json
+D:\Ingenieria\Proyecto Unity\AR Quest\HapticBridge\bin\Release\net10.0-windows\HapticBridge.runtimeconfig.json
+D:\Ingenieria\Proyecto Unity\AR Quest\HapticBridge\bin\Release\net10.0-windows\HapticBridge.dll
+D:\Ingenieria\Proyecto Unity\AR Quest\HapticBridge\bin\Release\net10.0-windows\HapticBridge.pdb
+D:\Ingenieria\Proyecto Unity\AR Quest\HapticBridge\obj\Release\net10.0-windows\HapticBridge.GeneratedMSBuildEditorConfig.editorconfig
+D:\Ingenieria\Proyecto Unity\AR Quest\HapticBridge\obj\Release\net10.0-windows\HapticBridge.AssemblyInfoInputs.cache
+D:\Ingenieria\Proyecto Unity\AR Quest\HapticBridge\obj\Release\net10.0-windows\HapticBridge.AssemblyInfo.cs
+D:\Ingenieria\Proyecto Unity\AR Quest\HapticBridge\obj\Release\net10.0-windows\HapticBridge.csproj.CoreCompileInputs.cache
+D:\Ingenieria\Proyecto Unity\AR Quest\HapticBridge\obj\Release\net10.0-windows\HapticBridge.dll
+D:\Ingenieria\Proyecto Unity\AR Quest\HapticBridge\obj\Release\net10.0-windows\refint\HapticBridge.dll
+D:\Ingenieria\Proyecto Unity\AR Quest\HapticBridge\obj\Release\net10.0-windows\HapticBridge.pdb
+D:\Ingenieria\Proyecto Unity\AR Quest\HapticBridge\obj\Release\net10.0-windows\HapticBridge.genruntimeconfig.cache
+D:\Ingenieria\Proyecto Unity\AR Quest\HapticBridge\obj\Release\net10.0-windows\ref\HapticBridge.dll
