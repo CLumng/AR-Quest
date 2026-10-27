@@ -25,12 +25,12 @@ layers_ideal = [
     ["Dura mater",920, 4.21, 1.1,  6],
 ]
 layers_model = [
-    ["Skin",327, 3.21, 0.5,  2.7],
-    ["Subcutaneous tissue",0, 2.98, 0.5,  28.5],
-    ["Supraspinous and interspinous ligaments", 72, 4.06, 0.8, 25.3],
-    ["Yellow ligament",920, 4.21, 1.1,  17.7],
-    ["Epidural space",0, 2.98, 0.5,  4.2],
-    ["Dura mater",920, 4.21, 1.1,  7],
+    ["Skin",327, 3.21, 0.5,  2.68],
+    ["Subcutaneous tissue",0, 2.98, 0.5,  28.52],
+    ["Supraspinous and interspinous ligaments", 72, 4.06, 0.8, 25.27],
+    ["Yellow ligament",920, 4.21, 1.1,  17.71],
+    ["Epidural space",0, 2.98, 0.5,  4.18],
+    ["Dura mater",920, 4.21, 1.1,  7.02],
 ]
 def force_friction(x, layer_data):
     """

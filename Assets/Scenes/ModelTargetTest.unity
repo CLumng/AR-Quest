@@ -1116,37 +1116,6 @@ CanvasRenderer:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 90600249}
   m_CullTransparentMesh: 1
---- !u!1 &92729253
-GameObject:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  serializedVersion: 6
-  m_Component:
-  - component: {fileID: 92729254}
-  m_Layer: 0
-  m_Name: t
-  m_TagString: Untagged
-  m_Icon: {fileID: 0}
-  m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
-  m_IsActive: 1
---- !u!4 &92729254
-Transform:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 92729253}
-  serializedVersion: 2
-  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0, y: 0, z: 0}
-  m_LocalScale: {x: 1, y: 1, z: 1}
-  m_ConstrainProportionsScale: 0
-  m_Children: []
-  m_Father: {fileID: 0}
-  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &96390779
 GameObject:
   m_ObjectHideFlags: 0
@@ -13165,7 +13134,7 @@ MonoBehaviour:
   - {fileID: 268005091}
   - {fileID: 755271377}
   - {fileID: 16602331}
-  dropsPerSecond: 3
+  dropsPerSecond: 1
   mlPerDrop: 0.05
   fallLimit: 0.5
 --- !u!4 &1162122896
@@ -14699,6 +14668,7 @@ MonoBehaviour:
   aligner: {fileID: 1200277204}
   maxForce: 3
   strength: 1
+  damping: 0
   moveSpeed: 0.05
   turnSpeed: 30
 --- !u!4 &1237638999
@@ -16515,8 +16485,9 @@ MonoBehaviour:
     stiffness: 327
     viscosity: 3.21
     friction: 0.5
-    thickness: 0.003
+    thickness: 0.002679795
     continues: 0
+    scaleTo: 0
   - name: Subcutaneous fat
     start: 0.0036798157
     resistance: 0.2
@@ -16524,8 +16495,9 @@ MonoBehaviour:
     stiffness: 0
     viscosity: 2.98
     friction: 0.5
-    thickness: 0.006
+    thickness: 0.028520368
     continues: 0
+    scaleTo: 0
   - name: Supraspinous ligament
     start: 0.032200184
     resistance: 0.45
@@ -16533,8 +16505,9 @@ MonoBehaviour:
     stiffness: 72
     viscosity: 4.06
     friction: 0.8
-    thickness: 0.030000001
+    thickness: 0.025272436
     continues: 0
+    scaleTo: 3
   - name: Interspinous ligament
     start: 0.04230581
     resistance: 0.5
@@ -16542,8 +16515,9 @@ MonoBehaviour:
     stiffness: 72
     viscosity: 4.06
     friction: 0.8
-    thickness: 0.030000001
+    thickness: 0.015166812
     continues: 1
+    scaleTo: 3
   - name: Deep ligament (flavum)
     start: 0.05747262
     resistance: 0.85
@@ -16551,8 +16525,9 @@ MonoBehaviour:
     stiffness: 920
     viscosity: 4.21
     friction: 1.1
-    thickness: 0.003
+    thickness: 0.01770882
     continues: 0
+    scaleTo: 3
   - name: Epidural space
     start: 0.07518144
     resistance: 0.08
@@ -16560,8 +16535,9 @@ MonoBehaviour:
     stiffness: 0
     viscosity: 2.98
     friction: 0.5
-    thickness: 0.006
+    thickness: 0.0041803867
     continues: 0
+    scaleTo: 3
   - name: Dura and fluid
     start: 0.079361826
     resistance: 0.03
@@ -16569,8 +16545,9 @@ MonoBehaviour:
     stiffness: 920
     viscosity: 4.21
     friction: 1.1
-    thickness: 0.006
+    thickness: 0.007017553
     continues: 0
+    scaleTo: 3
   fullSpeed: 0.015
   restShare: 0.2
   interval: 0.03
@@ -22406,8 +22383,9 @@ MonoBehaviour:
     stiffness: 327
     viscosity: 3.21
     friction: 0.5
-    thickness: 0.003
+    thickness: 0.002679795
     continues: 0
+    scaleTo: 0
   fullSpeed: 0.015
   restShare: 0.2
   interval: 0.03
@@ -25991,5 +25969,4 @@ SceneRoots:
   - {fileID: 1162122896}
   - {fileID: 1237638999}
   - {fileID: 1257168390}
-  - {fileID: 92729254}
   - {fileID: 1022026938}

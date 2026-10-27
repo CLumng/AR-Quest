@@ -11,8 +11,10 @@ using UnityEngine.InputSystem.XR;
 /// A bone is the exception: the tip on bone buzzes at boneAmplitude, whatever the layer.
 /// NeedleAction feeds it every frame: Feel with the tip's depth under the skin, Hit on bone, Release when the tip is out.
 /// For a force device (the Touch stylus) the same table also holds the physical constants of each tissue and Force works out the needle's
-/// force along its axis: F = F_tip + F_friction, F_tip = -(k·dx + rho·v), F_friction = -mu·sign(v) (dx: how far the tip is past where the tissue
-/// starts, at most its thickness; v: the tip's speed, + = in). The sign is against the motion, so every term opposes it.
+/// force along its axis as the user's model does (Python/IdealCurve.py): F = F_tip + F_friction, F_tip = -(k·dx + rho·v), F_friction =
+/// -(sum of mu of every tissue the tip has gone into)·sign(v) (dx: how far the tip is past where its tissue starts, not capped; v: the tip's
+/// speed, + = in). The sign is against the motion, so every term opposes it (IdealCurve.py subtracts rho·v; at these speeds it is ~0.01 N).
+/// A tissue with scaleTo has its whole force scaled so its peak is that (every tissue above 3 N, to 3 N): the curve keeps its shape.
 /// </summary>
 public class NeedleHaptics : MonoBehaviour
 {
@@ -25,9 +27,10 @@ public class NeedleHaptics : MonoBehaviour
         public float pop;        // 0..1: short impulse when the tip enters it
         public float stiffness;  // N/m: the tissue's spring, pushing the tip back by this much per metre it is past the start
         public float viscosity;  // N·s/m: its damper, against the tip's speed
-        public float friction;   // N: kinetic friction of the shaft, against the motion
-        public float thickness;  // m: the spring stops stretching after this much (on the first layer of a tissue that spans several)
+        public float friction;   // N: kinetic friction of the shaft in this tissue, against the motion; it stays once the tip is deeper
+        public float thickness;  // m: the tissue's width in the model, to the next tissue (the last one to the target); only Peak reads it
         public bool continues;   // one tissue with the layer before: the spring goes on from where that one started
+        public float scaleTo;    // N: the force in this layer is scaled so its peak (TissuePeak) is this; 0 = as the formula gives it
     }
 
     public Layer[] layers;           // sorted by start; each one runs until the next starts, the last until the target
@@ -51,16 +54,19 @@ public class NeedleHaptics : MonoBehaviour
     public float Axial { get; private set; }    // N along the needle as the table has it (NeedleAction.TableScale brings it to the device): negative = against the advance
     public float PopPulse { get; private set; } // 0..1: the pop of the layer just entered, running down
 
-    /// <summary>The strongest steady force of the table (N): a tissue's spring at its full stretch plus its friction.</summary>
+    /// <summary>The strongest steady force of the table (N): the highest tissue peak, after scaling.</summary>
     public float Peak
     {
         get
         {
             float peak = 0;
-            for (int i = 0; i < layers.Length; i++) peak = Mathf.Max(peak, layers[i].stiffness * layers[First(i)].thickness + layers[i].friction);
+            for (int i = 0; i < layers.Length; i++) peak = Mathf.Max(peak, layers[i].scaleTo > 0 ? layers[i].scaleTo : TissuePeak(i));
             return peak;
         }
     }
+
+    /// <summary>The formula's steady force at the end of layer i (N): its tissue's spring stretched over the tissue's width plus the friction of every tissue so far.</summary>
+    public float TissuePeak(int i) => layers[i].stiffness * layers[First(i)].thickness + Friction(i);
 
     void OnDisable() { Release(); }
 
@@ -104,9 +110,18 @@ public class NeedleHaptics : MonoBehaviour
         int i = IndexAt(depth);
         if (i < 0) return 0;
         var l = layers[i];
-        var first = layers[First(i)];
-        float dx = Mathf.Min(depth - first.start, first.thickness);
-        return -(l.stiffness * dx + l.viscosity * speed) - l.friction * Mathf.Clamp(speed / frictionSpeed, -1, 1);
+        float dx = depth - layers[First(i)].start;
+        float force = -(l.stiffness * dx + l.viscosity * speed) - Friction(i) * Mathf.Clamp(speed / frictionSpeed, -1, 1);
+        float peak = l.scaleTo > 0 ? TissuePeak(i) : 0;
+        return peak > 0 ? force * l.scaleTo / peak : force;
+    }
+
+    // The shaft's kinetic friction with the tip in layer i: every tissue it has gone into, each once (a layer that continues one is that tissue).
+    float Friction(int i)
+    {
+        float mu = 0;
+        for (int j = 0; j <= i; j++) if (!layers[j].continues) mu += layers[j].friction;
+        return mu;
     }
 
     /// <summary>The needle is in the tissue with its tip at this depth. Call every frame.</summary>

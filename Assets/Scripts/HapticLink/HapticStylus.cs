@@ -28,6 +28,7 @@ public class HapticStylus : MonoBehaviour
     public LandmarkAligner aligner;   // its menu's Settings page has the stylus (state, help mode, force strength)
     public float maxForce = 1f;       // N, the most that is ever asked (the bridge limits it too)
     public float strength = 1f;       // 0..1, on every force and on the limit
+    public float damping = 0.04f;     // s, time constant of the dampening of the force sent (0 = off): about 3 frames at 72 Hz
     public float moveSpeed = 0.05f;   // m/s of home at full stick
     public float turnSpeed = 30;      // degrees/s of home at full stick
 
@@ -46,6 +47,7 @@ public class HapticStylus : MonoBehaviour
     bool _manual, _b1, _b2, _forcesOn, _dirty;
     int _frame = -1;
     Vector3 _pending;                // the force NeedleAction asked this frame, in the world's frame
+    Vector3 _damped;                 // what the dampening let through last frame (world's frame)
     Vector3 _defaultPos;
     float _defaultYaw;
 
@@ -127,10 +129,21 @@ public class HapticStylus : MonoBehaviour
         else if (_dirty) Save();
     }
 
-    /// <summary>End of the frame: the force is limited, put in the device's frame and handed to the link.</summary>
-    public void Flush()
+    /// <summary>End of the frame: the force is limited, dampened, put in the device's frame and handed to the link.</summary>
+    public void Flush() { Flush(Time.deltaTime); }
+
+    /// <summary>
+    /// The dampening is a low-pass on the limited force (the formula and its friction are untouched): a jump in what NeedleAction asks, like the
+    /// friction flipping sign between frames, reaches the device as a ramp of about `damping` seconds, and since it only mixes forces that are
+    /// already inside the limit it can never leave it. Disarming, a lost link or a NaN cut the force at once, with no tail.
+    /// </summary>
+    public void Flush(float dt)
     {
-        var f = _forcesOn && Live && float.IsFinite(_pending.x + _pending.y + _pending.z) ? Vector3.ClampMagnitude(_pending, maxForce) * strength : Vector3.zero;
+        float limit = maxForce * strength;
+        bool on = _forcesOn && Live && float.IsFinite(_pending.x + _pending.y + _pending.z);
+        var target = on ? Vector3.ClampMagnitude(_pending, maxForce) * strength : Vector3.zero;
+        _damped = !on || damping <= 0 ? target : Vector3.ClampMagnitude(Vector3.Lerp(_damped, target, 1 - Mathf.Exp(-dt / damping)), limit);
+        var f = _damped;
         _pending = Vector3.zero;
         SentWorld = f;
         var local =Quaternion.Inverse(home.rotation) * f; // the model's frame, then the device's: Z flips (the device's +Z is toward the user)

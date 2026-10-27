@@ -68,6 +68,7 @@ public static class HapticStylusCheck
 
             // ---- the mapping, with the home point turned like the builder does (180 degrees about Y) ----
             var stylus = Make("stylus", active: false).AddComponent<HapticStylus>(); // no OnEnable (no scene to wire): states are injected
+            stylus.damping = 0; // the cases below read the force the frame it is pushed; the dampening has its own cases
             if (bridge != null)
             {
                 stylus.port = BridgePort;
@@ -167,6 +168,52 @@ public static class HapticStylusCheck
             stylus.Flush();
             Expect("disarmed, nothing is sent", !stylus.SentEnabled && stylus.SentForce == Vector3.zero);
 
+            // ---- the dampening (the force is armed and disarmed with button 2; it ends disarmed, like before) ----
+            void Press() { stylus.Inject(State(Vector3.zero)); stylus.Tick(0.02f); stylus.Inject(State(Vector3.zero, buttons: HapticProtocol.Button2)); stylus.Tick(0.02f); }
+            const float Frame = 1 / 72f;
+            Press();
+            stylus.damping = 0.05f;
+            stylus.Push(new Vector3(0, 0, 0.5f));
+            stylus.Flush(Frame);
+            float first = stylus.SentForce.z;
+            Expect($"a step of 0.5 N arrives as a ramp, not at once ({first:F2} N on the first frame)", first > 0.05f && first < 0.25f);
+            for (int i = 0; i < 72; i++) { stylus.Push(new Vector3(0, 0, 0.5f)); stylus.Flush(Frame); }
+            Expect("and gets there", Is(stylus.SentForce.z, 0.5f, 0.01f));
+            float lo = 1, hi = -1;
+            for (int i = 0; i < 80; i++) // the friction switching on and off at ~9 Hz (4 frames each), 0.6 N
+            {
+                stylus.Push(new Vector3(0, 0, i / 4 % 2 == 0 ? 0.6f : 0));
+                stylus.Flush(Frame);
+                if (i >= 48) { lo = Mathf.Min(lo, stylus.SentForce.z); hi = Mathf.Max(hi, stylus.SentForce.z); }
+            }
+            Expect($"a 0.6 N flip-flop at 9 Hz is cut to about half ({hi - lo:F2} N peak to peak)", hi - lo < 0.36f && hi - lo > 0.1f);
+            float worst = 0;
+            for (int i = 0; i < 80; i++) // spikes far over the limit, both ways
+            {
+                stylus.Push(new Vector3(0, i / 3 % 2 == 0 ? 5 : -5, 0));
+                stylus.Flush(Frame);
+                worst = Mathf.Max(worst, stylus.SentForce.magnitude);
+            }
+            Expect($"spikes over the limit never get past it ({worst:F3} N, maxForce {stylus.maxForce})", worst <= stylus.maxForce + 1e-4f && worst > 0.3f);
+            stylus.Push(new Vector3(0, 0, 0.5f));
+            stylus.Flush(Frame);
+            stylus.Push(Vector3.zero);
+            stylus.Flush(Frame);
+            Expect($"the force that is no longer asked fades out instead of dropping ({stylus.SentForce.magnitude:F2} N one frame later)", stylus.SentForce.magnitude > 0.05f);
+            Press();
+            stylus.Push(new Vector3(0, 0, 0.5f));
+            stylus.Flush(Frame);
+            Expect("disarming cuts it at once, with no tail", !stylus.SentEnabled && stylus.SentForce == Vector3.zero);
+            Press();
+            stylus.Push(new Vector3(float.NaN, 0, 0));
+            stylus.Flush(Frame);
+            Expect("a NaN cuts it at once too", stylus.SentForce == Vector3.zero);
+            stylus.Push(new Vector3(0, 0, 0.5f));
+            stylus.Flush(Frame);
+            Expect("and the next force starts from zero again", stylus.SentForce.z > 0 && stylus.SentForce.z < 0.25f);
+            Press();
+            stylus.damping = 0;
+
             // ---- the tissue's force law ----
             Vector3 F(Vector3 offset, bool blocked = false, float pushed = 0, float axial = 0, float pop = 0) =>
                 NeedleAction.StylusForce(offset, Vector3.forward, blocked, pushed, axial, pop, 150, 300, 1);
@@ -188,15 +235,17 @@ public static class HapticStylusCheck
                 new NeedleHaptics.Layer { name = "d", start = 0.06f, resistance = 0.1f, pop = 0, stiffness = 0, viscosity = 3, friction = 0.2f, thickness = 0.005f },
             };
             haptics.silent = true;
-            Expect("the strongest steady force of the table is b's spring at its stretch plus its friction (2.5 N)", Is(haptics.Peak, 2.5f));
+            Expect("the strongest steady force of the table is b's spring over its width plus the friction of a and b (2.6 N)", Is(haptics.Peak, 2.6f));
             Expect("at rest 5 mm into a only the spring is felt: -k·dx = -0.1 N", Is(haptics.Force(0.005f, 0), -0.1f));
-            Expect("a spring stops stretching at the thickness: 15 mm into a is -0.2 N", Is(haptics.Force(0.015f, 0), -0.2f));
+            Expect("a spring is not capped (IdealCurve.py): 15 mm into a is -0.3 N", Is(haptics.Force(0.015f, 0), -0.3f));
             Expect("moving in at 10 mm/s adds the damper and the friction (whole above 3 mm/s): -(0.1 + 2·0.01) - 0.1 = -0.22 N", Is(haptics.Force(0.005f, 0.01f), -0.22f));
             Expect("moving out at 10 mm/s they turn around: -(0.1 - 0.02) + 0.1 = +0.02 N", Is(haptics.Force(0.005f, -0.01f), 0.02f));
             Expect("the friction fades out below 3 mm/s (half of it at 1.5): -0.1 - 0.003 - 0.05 = -0.153 N", Is(haptics.Force(0.005f, 0.0015f), -0.153f));
             Expect("each tissue starts its spring over: 1 mm into b is -0.2 N, at rest", Is(haptics.Force(0.021f, 0), -0.2f));
-            Expect("a tissue that continues does not: c is 21 mm into the spring that began at b, capped at 10 mm (-2 N)", Is(haptics.Force(0.041f, 0), -2f));
-            Expect("past a spring-free tissue only the damper and the friction are left: d at 5 mm/s is -(3·0.005) - 0.2 = -0.215 N", Is(haptics.Force(0.07f, 0.005f), -0.215f));
+            Expect("a tissue that continues does not: c is 21 mm into the spring that began at b (-4.2 N)", Is(haptics.Force(0.041f, 0), -4.2f));
+            Expect("the friction is every tissue's the tip went into, c once with b: 1 mm into b at 10 mm/s is -(0.2 + 0.04) - 0.6 = -0.84 N, c the same plus its stretch",
+                Is(haptics.Force(0.021f, 0.01f), -0.84f) && Is(haptics.Force(0.041f, 0.01f), -(4.2f + 0.04f) - 0.6f));
+            Expect("past a spring-free tissue the damper and that friction are left: d at 5 mm/s is -(3·0.005) - (0.1 + 0.5 + 0.2) = -0.815 N", Is(haptics.Force(0.07f, 0.005f), -0.815f));
             Expect("before the first layer there is nothing", haptics.Force(-0.001f, 0.01f) == 0);
             float depth = 0;
             for (int i = 0; i < 40; i++) { depth += haptics.fullSpeed * 0.02f; haptics.Feel(depth, 0.02f); } // 12 mm in, the second layer starts at 20
@@ -299,12 +348,14 @@ public static class HapticStylusCheck
             Hold(new Vector3(0, 0, 0.01f));
             Expect("1 cm through the skin it is inside", action.Current == NeedleAction.State.Inside);
             for (int i = 0; i < 20; i++) Hold(new Vector3(0, 0, 0.01f + 0.0003f * (i + 1))); // 15 mm/s: full speed
-            Expect($"the table's strongest force is the stylus' limit: 1 N / 2.5 N = {action.TableScale:F2}", Is(action.TableScale, 0.4f));
+            Expect($"the table's strongest force is the stylus' limit: 1 N / 2.6 N = {action.TableScale:F3}", Is(action.TableScale, 1 / 2.6f));
             Expect($"pushing in at full speed, the stylus is pushed back toward the user with the table's force, scaled (z {stylus.SentForce.z:F3})",
                 stylus.SentEnabled && stylus.SentForce.z > 0.1f && Is(stylus.SentForce.z, -haptics.Axial * action.TableScale, 1e-4f) && Mathf.Abs(stylus.SentForce.x) < 0.01f);
             var at = new Vector3(0, 0, 0.016f);
             for (int i = 0; i < 20; i++) Hold(at); // held still
-            Expect($"held still, the damper and the friction are gone and the spring stays: 20 N/m · 10 mm · 0.4 = 0.08 N (z {stylus.SentForce.z:F3})", Is(stylus.SentForce.z, 0.08f, 0.01f));
+            float stretch = action.Depth - haptics.layers[0].start;
+            Expect($"held still, the damper and the friction are gone and the spring stays, past a's 10 mm (not capped): 20 N/m · {stretch * 1000:F1} mm / 2.6 (z {stylus.SentForce.z:F3})",
+                stretch > 0.012f && Is(stylus.SentForce.z, 20 * stretch * action.TableScale, 0.01f));
             Hold(at + new Vector3(0.01f, 0, 0));
             Expect($"1 cm sideways it is pulled back toward the track (x {stylus.SentForce.x:F2})", stylus.SentForce.x < -0.5f);
             Tissue(false);
@@ -389,9 +440,9 @@ public static class HapticStylusCheck
             var files = Directory.Exists(runsDir) ? Directory.GetFiles(runsDir, "run-*.csv") : new string[0];
             string[] lines = files.Length == 1 ? File.ReadAllText(files[0]).Split(new[] { "\r\n" }, System.StringSplitOptions.RemoveEmptyEntries) : new string[0];
             Expect($"the complete run is saved as a CSV ({files.Length} file, {lines.Length - 1} rows for {graph.Samples.Count} samples)", files.Length == 1 && lines.Length == graph.Samples.Count + 1 && File.ReadAllText(files[0]) == graph.Csv());
-            Expect($"with a header and one row per frame: {(lines.Length > 1 ? lines[0] + " | " + lines[1] : "")}",
-                lines.Length > 1 && lines[0] == "time_s,depth_mm,tissue,phase,formula_N,along_N,side_N" && lines[1].Split(',').Length == 7 && lines[1].Split(',')[3] == "insertion" && lines[1].Split(',')[2] == "a");
-            Expect("the extraction rows say so", lines.Length > 1 && lines[lines.Length - 1].Split(',')[3] == "fluid" && lines[lines.Length - 1].Split(',')[2] == "b");
+            Expect($"with a header and one row per frame, separated by ';': {(lines.Length > 1 ? lines[0] + " | " + lines[1] : "")}",
+                lines.Length > 1 && lines[0] == "time_s;depth_mm;tissue;phase;formula_N;along_N;side_N" && lines[1].Split(';').Length == 7 && lines[1].Split(';')[3] == "insertion" && lines[1].Split(';')[2] == "a");
+            Expect("the extraction rows say so", lines.Length > 1 && lines[lines.Length - 1].Split(';')[3] == "fluid" && lines[lines.Length - 1].Split(';')[2] == "b");
             Press2(outside);
             Expect("the needle is out and the forces are off: the graph is shown on its card", !stylus.ForcesOn && graph.Visible && graph.card.gameObject.activeSelf);
             if (bridge != null)
@@ -413,19 +464,21 @@ public static class HapticStylusCheck
                 graph.Tick(0.02f);
             }
             var pixels = graph.Texture.GetPixels32();
-            int yellow = 0, banded = 0;
+            int yellow = 0, white = 0, banded = 0;
             foreach (var p in pixels)
             {
                 if (p.r > 200 && p.g > 150 && p.b < 80 && p.a > 200) yellow++;
+                if (p.r > 220 && p.g > 220 && p.b > 220 && p.a > 200) white++;
                 if (p.a > 90) banded++;
             }
-            Expect($"its texture has the curve ({yellow} px of the line) and the bands under it", graph.Texture.width == graph.width && graph.Texture.height == graph.height && yellow > 300 && banded > pixels.Length / 2);
+            Expect($"its texture has the two curves ({white} px of the formula's, {yellow} px of the stylus') and the bands under them",
+                graph.Texture.width == graph.width && graph.Texture.height == graph.height && yellow > 300 && white > 300 && banded > pixels.Length / 2);
             int labels = 0;
-            bool unitN = false, unitS = false;
-            foreach (Transform c in graph.plot.transform) if (c.gameObject.activeSelf && c != graph.tick.transform) { labels++; var text = c.GetComponent<TMP_Text>().text; unitN |= text.EndsWith(" N"); unitS |= text.EndsWith(" s"); }
-            Expect($"the axes have their values ({labels} labels), the units on the last ones", labels >= 6 && unitN && unitS);
-            Expect("the legend names the tissues it went through (a, b here) and the fluid, in their colours; the summary gives the peak",
-                graph.legend.text.Contains(">a</color>") && graph.legend.text.Contains(">b</color>") && graph.legend.text.Contains(">Fluid extraction</color>") && graph.summary.text.Contains("Peak"));
+            bool unitN = false, unitMm = false;
+            foreach (Transform c in graph.plot.transform) if (c.gameObject.activeSelf && c != graph.tick.transform) { labels++; var text = c.GetComponent<TMP_Text>().text; unitN |= text.EndsWith(" N"); unitMm |= text.EndsWith(" mm"); }
+            Expect($"the axes have their values ({labels} labels): force, and depth as in the Python graph, the units on the last ones", labels >= 6 && unitN && unitMm);
+            Expect("the legend names the tissues down to the deepest point (a, b here, not the fluid), in their colours; the summary gives the peak",
+                graph.legend.text.Contains(">a</color>") && graph.legend.text.Contains(">b</color>") && !graph.legend.text.Contains("Fluid") && graph.summary.text.Contains("Peak"));
             action.inMenu = true;
             graph.Tick(0.02f);
             Expect("the card steps aside while the menu is open", graph.Visible && !graph.card.gameObject.activeSelf);
@@ -583,7 +636,7 @@ public static class HapticStylusCheck
             Poke(new Vector3(0, 0, -0.03f));
             tester.Select(1); // the second layer pops on entry
             Poke(new Vector3(0, 0, 0.005f));
-            Expect($"the kick is off by default: 5 mm into the strong tissue only its spring pushes back (200 N/m · 5 mm · 0.4 = 0.4 N; z {stylus.SentForce.z:F2})", Is(stylus.SentForce.z, 0.4f, 0.01f));
+            Expect($"the kick is off by default: 5 mm into the strong tissue only its spring pushes back (200 N/m · 5 mm / 2.6 = 0.38 N; z {stylus.SentForce.z:F2})", Is(stylus.SentForce.z, 1 / 2.6f, 0.01f));
             Poke(new Vector3(0, 0, -0.03f));
             action.popForce = 2; // turned on: 1.2 N forward against the 0.4 N of the spring
             Poke(new Vector3(0, 0, 0.005f));

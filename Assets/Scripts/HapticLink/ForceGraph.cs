@@ -10,8 +10,10 @@ using UnityEngine.UI;
 /// The force graph of a puncture done with the Touch stylus. It records what the stylus is pushed with, from the frame the needle goes
 /// through the skin to the moment the fluid extraction is stopped, and only while the forces are armed: if they are turned off, or the
 /// needle comes out of the model, before the extraction is over, the run is dropped and nothing is drawn. Once it is complete, the graph
-/// appears when the user has taken the needle out of the model and turned the forces off, on a card in front of them: the force along the
-/// needle (+ = against the advance) and the sideways one against time, over bands that say which tissue the tip was in, then the fluid.
+/// appears when the user has taken the needle out of the model and turned the forces off, on a card in front of them. It is drawn like the
+/// ideal curve (Python/IdealCurve.py): force against depth, over a band per tissue of the table with a dotted line where each one starts;
+/// the tissues' formula force (before scaling) and the force sent to the stylus along the needle, + = against the advance. Only the
+/// insertion is drawn: during the fluid extraction the needle stands still (the CSV has it all).
 /// A (or the stylus' button 1, see NeedleAction.Toggle) closes it; a new puncture with the forces on starts over. The card is out of the
 /// way while the menu is open. All UI text is English.
 /// Each complete run is also saved as a CSV (Csv): on the PC by the bridge, which the headset sends it to over the link (HapticStylus.SendRun;
@@ -47,14 +49,13 @@ public class ForceGraph : MonoBehaviour
     public const int MaxSamples = 40000;   // about 8 minutes at 72 Hz; a longer run is cut here
     public const float ReentrySeconds = 1; // a needle that was out of the model for less than this is not starting a new puncture after a complete run
 
-    // The tissues' colours (the bands under the lines and the legend), then the fluid's.
+    // The tissues' colours (the bands under the lines and the legend), by their index in the table.
     static readonly Color32[] Palette =
     {
         new(255, 179, 140, 255), new(200, 205, 214, 255), new(128, 217, 148, 255), new(102, 204, 224, 255),
         new(168, 158, 255, 255), new(242, 148, 209, 255), new(255, 128, 128, 255), new(89, 166, 255, 255),
     };
-    static readonly Color32 AlongColor = new(255, 212, 0, 255), SideColor = new(239, 244, 250, 255);
-    const int Fluid = -2; // the band of the fluid extraction; the tissues' are their index in the table, -1 = before the first one
+    static readonly Color32 AlongColor = new(255, 212, 0, 255), FormulaColor = new(239, 244, 250, 255), EdgeColor = new(170, 176, 186, 255);
 
     public Mode State { get; private set; }
     public bool Visible => State == Mode.Shown;
@@ -127,15 +128,15 @@ public class ForceGraph : MonoBehaviour
     /// </summary>
     public string Csv()
     {
-        var sb = new StringBuilder("time_s,depth_mm,tissue,phase,formula_N,along_N,side_N\r\n");
+        var sb = new StringBuilder("time_s;depth_mm;tissue;phase;formula_N;along_N;side_N\r\n");
         var layers = needle != null && needle.haptics != null ? needle.haptics.layers : null;
         foreach (var s in _samples)
         {
             int layer = LayerOf(s.depth);
             string tissue = layer < 0 ? "" : layers[layer].name;
-            if (tissue.IndexOfAny(new[] { ',', '"' }) >= 0) tissue = "\"" + tissue.Replace("\"", "\"\"") + "\"";
-            sb.Append(Num(s.t, "0.####")).Append(',').Append(Num(s.depth * 1000, "0.###")).Append(',').Append(tissue).Append(',').Append(s.fluid ? "fluid" : "insertion").Append(',')
-              .Append(Num(s.table, "0.#####")).Append(',').Append(Num(s.along, "0.#####")).Append(',').Append(Num(s.side, "0.#####")).Append("\r\n");
+            if (tissue.IndexOfAny(new[] { ';', '"' }) >= 0) tissue = "\"" + tissue.Replace("\"", "\"\"") + "\"";
+            sb.Append(Num(s.t, "0.####")).Append(';').Append(Num(s.depth * 1000, "0.###")).Append(';').Append(tissue).Append(';').Append(s.fluid ? "fluid" : "insertion").Append(';')
+              .Append(Num(s.table, "0.#####")).Append(';').Append(Num(s.along, "0.#####")).Append(';').Append(Num(s.side, "0.#####")).Append("\r\n");
         }
         return sb.ToString();
     }
@@ -218,8 +219,6 @@ public class ForceGraph : MonoBehaviour
         ShowSaved();
     }
 
-    int BandOf(in Sample s) => s.fluid ? Fluid : LayerOf(s.depth);
-
     // The tissue the tip is in at this depth: its index in the table, -1 before the first one.
     int LayerOf(float depth)
     {
@@ -230,15 +229,15 @@ public class ForceGraph : MonoBehaviour
         return found;
     }
 
-    static Color32 BandColor(int band) => band == Fluid ? Palette[7] : Palette[band % 7];
-
-    string BandName(int band) => band == Fluid ? "Fluid extraction" : needle.haptics.layers[band].name;
+    static Color32 BandColor(int layer) => Palette[layer % Palette.Length];
 
     /// <summary>Draws the run into the texture (and the card's labels, if it has them).</summary>
     public void Draw()
     {
-        int n = _samples.Count;
+        var run = _samples.FindAll(s => !s.fluid);
+        int n = run.Count;
         if (n < 2) return;
+        var layers = needle != null && needle.haptics != null && needle.haptics.layers != null ? needle.haptics.layers : new NeedleHaptics.Layer[0];
         int W = width, H = height;
         if (_tex == null || _tex.width != W || _tex.height != H)
         {
@@ -248,45 +247,40 @@ public class ForceGraph : MonoBehaviour
             _cov = new float[W * H];
         }
 
-        // The axes: time from 0 to the end of the run, force from the lowest to the highest of either line, in round steps.
-        float T = Mathf.Max(_samples[n - 1].t, 0.1f);
-        float lo = 0, hi = 0;
-        foreach (var s in _samples)
+        // The axes: depth from 0 to the deepest the tip went, force from the lowest to the highest of either line, in round steps.
+        float D = 0, lo = 0, hi = 0;
+        foreach (var s in run)
         {
-            lo = Mathf.Min(lo, Mathf.Min(s.along, s.side));
-            hi = Mathf.Max(hi, Mathf.Max(s.along, s.side));
+            D = Mathf.Max(D, s.depth);
+            lo = Mathf.Min(lo, Mathf.Min(s.along, s.table));
+            hi = Mathf.Max(hi, Mathf.Max(s.along, s.table));
         }
+        D = Mathf.Max(D, 0.001f);
         float ys = Nice(Mathf.Max(hi - lo, 0.1f) / 7);
         float ymin = lo > -0.1f * ys ? 0 : Mathf.Floor(lo / ys) * ys; // a whisper below zero does not earn a row of the axis (the margin shows it)
         float ymax = Mathf.Max(Mathf.Ceil(hi / ys) * ys, ymin + ys);
-        float xs = Nice(T / 6);
-        float ylo = ymin - 0.04f * (ymax - ymin), yhi = ymax + 0.04f * (ymax - ymin), xlo = -0.015f * T, xhi = 1.015f * T; // a margin, so the lines are not cut at the edge
-        float X(float t) => (t - xlo) / (xhi - xlo) * W;
+        float xs = Nice(D * 1000 / 8) / 1000; // m, labelled in mm
+        float ylo = ymin - 0.04f * (ymax - ymin), yhi = ymax + 0.04f * (ymax - ymin), xlo = -0.015f * D, xhi = 1.015f * D; // a margin, so the lines are not cut at the edge
+        float X(float d) => (d - xlo) / (xhi - xlo) * W;
         float Y(float v) => (v - ylo) / (yhi - ylo) * H;
 
         System.Array.Fill(_pixels, new Color32(0, 0, 0, 90));
 
-        // Bands: which tissue the tip was in (the first one runs from the left edge, the last to the right).
-        var bands = new List<int>();
-        int runStart = 0, runBand = BandOf(_samples[0]);
-        for (int i = 1; i <= n; i++)
+        // Bands: each tissue of the table from where it starts to where the next one does (the last one to the right edge), and a dotted
+        // line at each start but the first, as in the Python graph. The table is sorted by start.
+        int shown = 0;
+        for (int i = 0; i < layers.Length && layers[i].start < D; i++, shown++)
         {
-            int b = i < n ? BandOf(_samples[i]) : int.MinValue;
-            if (b == runBand) continue;
-            int x0 = runStart == 0 ? 0 : Mathf.Clamp(Mathf.RoundToInt(X(_samples[runStart].t)), 0, W);
-            int x1 = i == n ? W : Mathf.Clamp(Mathf.RoundToInt(X(_samples[i].t)), 0, W);
-            if (runBand != -1)
-            {
-                if (!bands.Contains(runBand)) bands.Add(runBand);
-                var color = BandColor(runBand);
-                for (int y = 0; y < H; y++)
-                    for (int x = x0; x < x1; x++) Over(ref _pixels[y * W + x], color, 0.2f);
-            }
-            runStart = i;
-            runBand = b;
+            int x0 = Mathf.Clamp(Mathf.RoundToInt(X(layers[i].start)), 0, W);
+            int x1 = i + 1 < layers.Length && layers[i + 1].start < D ? Mathf.Clamp(Mathf.RoundToInt(X(layers[i + 1].start)), 0, W) : W;
+            var color = BandColor(i);
+            for (int y = 0; y < H; y++)
+                for (int x = x0; x < x1; x++) Over(ref _pixels[y * W + x], color, 0.2f);
+            if (i > 0 && x0 < W)
+                for (int y = 0; y < H; y++) if (y / 5 % 2 == 0) Over(ref _pixels[y * W + x0], EdgeColor, 0.8f);
         }
 
-        // Grid: a line at each round value of force (the zero line brighter) and of time.
+        // Grid: a line at each round value of force (the zero line brighter) and of depth.
         var white = new Color32(255, 255, 255, 255);
         for (float v = ymin; v <= ymax + ys * 0.01f; v += ys)
         {
@@ -295,15 +289,15 @@ public class ForceGraph : MonoBehaviour
             for (int y = Mathf.Max(0, row - 1); y <= Mathf.Min(H - 1, row); y++)
                 for (int x = 0; x < W; x++) Over(ref _pixels[y * W + x], white, a);
         }
-        for (float t = 0; t <= T + xs * 0.01f; t += xs)
+        for (float d = 0; d <= D + xs * 0.01f; d += xs)
         {
-            int col = Mathf.RoundToInt(X(t));
+            int col = Mathf.RoundToInt(X(d));
             for (int x = Mathf.Max(0, col - 1); x <= Mathf.Min(W - 1, col); x++)
                 for (int y = 0; y < H; y++) Over(ref _pixels[y * W + x], white, 0.07f);
         }
 
-        Stroke(false, 1.2f, SideColor, X, Y);
-        Stroke(true, 2.4f, AlongColor, X, Y);
+        Stroke(run, s => s.table, 2.4f, FormulaColor, X, Y);
+        Stroke(run, s => s.along, 1.4f, AlongColor, X, Y); // thinner, on top: where the two are the same (scale 1) both still show
 
         _tex.SetPixelData(_pixels, 0);
         _tex.Apply(false);
@@ -313,27 +307,32 @@ public class ForceGraph : MonoBehaviour
         int used = 0;
         for (float v = ymin; v <= ymax + ys * 0.01f; v += ys)
             Label(used++, Num(v, "0.##") + (v + ys > ymax + ys * 0.01f ? " N" : ""), new Vector2(0, (Y(v)) / H), new Vector2(1, 0.5f), new Vector2(-8, 0));
-        for (float t = 0; t <= T + xs * 0.01f; t += xs)
-            Label(used++, Num(t, "0.#") + (t + xs > T + xs * 0.01f ? " s" : ""), new Vector2(X(t) / W, 0), new Vector2(0.5f, 1), new Vector2(0, -6));
+        for (float d = 0; d <= D + xs * 0.01f; d += xs)
+            Label(used++, Num(d * 1000, "0.#") + (d + xs > D + xs * 0.01f ? " mm" : ""), new Vector2(X(d) / W, 0), new Vector2(0.5f, 1), new Vector2(0, -6));
         for (int i = used; i < _labels.Count; i++) _labels[i].gameObject.SetActive(false);
 
         if (legend != null)
         {
             var sb = new StringBuilder();
-            foreach (int b in bands)
+            for (int i = 0; i < shown; i++)
             {
-                var c = BandColor(b);
-                sb.Append($"<color=#{c.r:X2}{c.g:X2}{c.b:X2}>{BandName(b)}</color>   ");
+                var c = BandColor(i);
+                sb.Append($"<color=#{c.r:X2}{c.g:X2}{c.b:X2}>{layers[i].name}</color>   ");
             }
             legend.text = sb.ToString().TrimEnd();
         }
         if (summary != null)
         {
             int peak = 0;
-            for (int i = 1; i < n; i++) if (_samples[i].along > _samples[peak].along) peak = i;
-            int where = BandOf(_samples[peak]);
-            summary.text = $"Peak <b>{Num(_samples[peak].along, "0.00")} N</b> in {(where < 0 ? "the skin" : BandName(where))}   ·   {Num(T, "0")} s in all\n" +
-                "<color=#FFD400>Along the needle</color> (+ pushes against the advance)   <color=#EFF4FA>Sideways</color>";
+            float sent = 0;
+            for (int i = 0; i < n; i++)
+            {
+                if (run[i].table > run[peak].table) peak = i;
+                sent = Mathf.Max(sent, run[i].along);
+            }
+            int where = LayerOf(run[peak].depth);
+            summary.text = $"Peak <b>{Num(run[peak].table, "0.00")} N</b> in {(where < 0 ? "the skin" : layers[where].name)} at {Num(run[peak].depth * 1000, "0.#")} mm   ·   {Num(_samples[_samples.Count - 1].t, "0")} s in all\n" +
+                $"<color=#EFF4FA>Needle force</color> (the tissues' formula)   <color=#FFD400>Sent to the stylus</color> (peak {Num(sent, "0.00")} N)";
         }
     }
 
@@ -352,22 +351,19 @@ public class ForceGraph : MonoBehaviour
         rt.anchoredPosition = offset;
     }
 
-    // One line through the samples: its distance to each pixel gives the coverage (soft edges), the strongest one counts, then it is laid over.
-    void Stroke(bool along, float r, Color32 color, System.Func<float, float> X, System.Func<float, float> Y)
+    // One line through the samples (depth, value): its distance to each pixel gives the coverage (soft edges), the strongest one counts, then it is laid over.
+    void Stroke(List<Sample> run, System.Func<Sample, float> value, float r, Color32 color, System.Func<float, float> X, System.Func<float, float> Y)
     {
         System.Array.Clear(_cov, 0, _cov.Length);
-        Vector2 a = Point(0, along, X, Y);
-        for (int i = 1; i < _samples.Count; i++)
+        Vector2 a = new(X(run[0].depth), Y(value(run[0])));
+        for (int i = 1; i < run.Count; i++)
         {
-            var b = Point(i, along, X, Y);
+            Vector2 b = new(X(run[i].depth), Y(value(run[i])));
             Segment(a, b, r);
             a = b;
         }
         for (int k = 0; k < _cov.Length; k++) if (_cov[k] > 0) Over(ref _pixels[k], color, _cov[k]);
     }
-
-    Vector2 Point(int i, bool along, System.Func<float, float> X, System.Func<float, float> Y) =>
-        new(X(_samples[i].t), Y(along ? _samples[i].along : _samples[i].side));
 
     void Segment(Vector2 a, Vector2 b, float r)
     {
