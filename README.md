@@ -35,7 +35,7 @@ El proyecto nació para probar si se puede hacer en el Quest algo parecido a un 
 | `Assets/Scenes/` | `ModelTargetTest` (la app, primera en Build Settings), `HapticLinkTest` (prueba del enlace, desactivada), `SampleScene` |
 | `Assets/Geometry/` | `Anatomy.prefab` (columna lumbar + pelvis, ~30×22×14 cm), mallas de tejidos y `spinalNeedle1.fbx` |
 | `HapticBridge/` | Puente del PC: `Bridge.cs` (motor: Touch por `hd.dll`, servidor TCP, sensores, CSV) y `HapticBridge.pyw` (ventana en tkinter) |
-| `Python/` | `IdealCurve.py` (curva de fuerza ideal y la de Unity), `Characterization.py` (análisis de las corridas) |
+| `Graphs/` | `IdealCurve.py` (curva de fuerza ideal y la de Unity), `Characterization.py` (análisis de las corridas) |
 | `Docs/CSV_y_graficas.md` | Cómo se obtiene cada variable de los CSV y qué es cada eje de cada gráfica |
 
 ## 3. Requisitos
