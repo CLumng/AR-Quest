@@ -61,15 +61,16 @@ public class NeedleAction : MonoBehaviour
     public float guideLost = 1.6f;      // times those tolerances: past this the force is off until the stylus goes back
     public float guideApproach = 0.015f; // m before the path's start where the stylus starts to be judged (if it is within guideCapture of the path):
                                          // short on purpose, the stylus' far point (arm stretched out) is where the user starts and must not be judged
-    public float guideReset = 0.025f;    // m: farther out than this it is not judged any more and a lost try starts over; more than guideApproach, so it does not flicker
-    public float guideCapture = 0.03f;
+    public float guideReset = 0.025f;    // m: farther out than this it is not judged any more and a lost try starts over; more than guideApproach, so it does not flicker.
+                                         // Also how far the help mode's box reaches past the entry and past the target
+    public float guideCapture = 0.03f;   // m: the box's half width (and how near the path the stylus must be to start being judged)
     public float guideEase = 8f;        // per second: how fast the needle goes onto the path when the stylus is judged, and back to the hand when it is not
     public Transform ghost;             // help mode: a see-through needle where the stylus really is, while the needle is held on the path
     public ForceGraph graph;            // the graph of a puncture with the forces on: A (or the stylus' button 1) closes it once it is shown
     public float lockStiffness = 300f;  // N/m: how hard the stylus is held where it was while the fluid is extracted
 
     // The help mode's indicator, on the message card.
-    public enum Band { None, Good, Close, Off, Lost }
+    public enum Band { None, Good, Close, Off, Lost, Far }
     enum Guide { Free, Engaged, Lost }
 
     const float Clearance = 0.0005f; // a needle stopped by a bone stays this far off its surface, so the next test does not start on it
@@ -88,6 +89,7 @@ public class NeedleAction : MonoBehaviour
     public bool ByStylus => stylus != null && stylus.Active;
     public float Depth => _s;      // how far the needle is in, m along its track
     public Vector3 Dir => _dir;    // the way it is going (the track's direction)
+    public Vector3 Tip => _tip;    // where the tip is shown (world); only meaningful while the needle is in
     /// <summary>N at the stylus per N of the tissue's table: the table's strongest steady force is the stylus' limit, so the layers keep their proportions.</summary>
     public float TableScale { get { float peak = haptics != null ? haptics.Peak : 0; return peak > 0 && stylus != null ? stylus.maxForce / peak : 0; } }
     // Where the stylus is against the ideal path, whether or not it is being judged (the menu's Settings page shows it): along the path from
@@ -95,11 +97,16 @@ public class NeedleAction : MonoBehaviour
     public float GuideAlong => _along;
     public float GuideOff => _lat;
     public float GuideTilt => _ang;
-    public bool Guided => guided && ByStylus && model != null && model.pathEntry != null && model.pathTarget != null;
-    public Band GuideBand => !Guided || _guide == Guide.Free ? Band.None : _guide == Guide.Lost ? Band.Lost : _deviation < 0.6f ? Band.Good : _deviation < 1 ? Band.Close : Band.Off;
+    bool PathReady => model != null && model.pathEntry != null && model.pathTarget != null;
+    public bool Guided => guided && ByStylus && PathReady;
+    // The stylus is out of the dock and has not been pulled back behind the path's start yet (help mode or not): the card says to move it back as far as it goes.
+    bool FarHint => ByStylus && PathReady && !parked && !_far && !_in;
+    public Band GuideBand => !Guided || _guide == Guide.Free ? (FarHint ? Band.Far : Band.None) : _guide == Guide.Lost ? Band.Lost : _deviation < 0.6f ? Band.Good : _deviation < 1 ? Band.Close : Band.Off;
     bool _in, _blocked;
     bool _wasParked, _wasGuided;
     Guide _guide;
+    bool _begun;                  // help mode: this try started properly (judged on the way in), so a lost or left one can be picked up again
+    bool _far;                    // the stylus has been behind the help box (pulled back as far as it goes) since it left the dock; until then the card says to
     float _deviation, _lat, _ang; // the stylus against the ideal path: the larger of its two errors in tolerances, the tip's distance (m), the pen's angle
     float _along;                 // how far along the path the stylus' tip is from the entry (m; negative = before it)
     float _over;                  // how far the stylus has gone on past the target (m): the needle stops there
@@ -191,8 +198,10 @@ public class NeedleAction : MonoBehaviour
         if (parked && _in) Leave();
         if (!parked && _wasParked) Gone(true);
         _wasParked = parked;
+        if (ByStylus && PathReady) // behind the box's back face = the arm stretched out, where the device has the whole stroke ahead
+            _far = !parked && (_far || Vector3.Dot(hand - model.pathEntry.position, (model.pathTarget.position - model.pathEntry.position).normalized) < -guideReset);
         bool guide = Guided;
-        if (guide != _wasGuided) { _wasGuided = guide; Leave(); _guide = Guide.Free; } // changing mode starts the needle over
+        if (guide != _wasGuided) { _wasGuided = guide; Leave(); _guide = Guide.Free; _begun = false; } // changing mode starts the needle over
 
         float depth = -1;
         Vector3 entry = default;
@@ -324,7 +333,8 @@ public class NeedleAction : MonoBehaviour
 
     // Help mode: the track is the ideal path (entry to target). The stylus is judged from the moment its tip is near the path's start,
     // going on the way it came: errors are the tip's distance from the path and the pen's angle to it, in tolerances. Past guideLost the force
-    // is off and the stylus is not judged again until it goes back out beyond guideReset, or to its dock. While it is judged the needle is held
+    // is off until the stylus is back on the path (within one tolerance) inside the box around it; a try that never began properly (straight
+    // into the body) needs a new start instead: out of the box beyond guideReset before the entry, or the dock. While it is judged the needle is held
     // on the path (it eases onto it, and back to the hand when the judging stops, so it does not jump); where the stylus really is, the
     // ghost shows. The needle is in from the entry on and stops at the target.
     void GuideStep(Vector3 hand, Vector3 forward, float dt)
@@ -341,9 +351,19 @@ public class NeedleAction : MonoBehaviour
         _deviation = Mathf.Max(_lat / guideLateral, _ang / guideAngle);
 
         _along = a;
-        if (parked || a < -guideReset) _guide = Guide.Free;
+        // The help mode's space is a box around the path: guideReset before the entry to guideReset past the target, guideCapture to each side.
+        // Out of it nothing is judged. Back in, a try that was begun goes on: a lost one picks up as soon as the stylus is back on the path.
+        var local = Quaternion.Inverse(Quaternion.LookRotation(d, Vector3.up)) * rel;
+        bool inBox = a >= -guideReset && a <= length + guideReset && Mathf.Abs(local.x) <= guideCapture && Mathf.Abs(local.y) <= guideCapture;
+        if (parked || a < -guideReset) _begun = false; // back at the start, or docked: a new try
+        if (parked || !inBox) _guide = Guide.Free;
         else if (_guide == Guide.Free && !_gone && a >= -guideApproach && _lat <= guideCapture) _guide = a <= 0 ? Guide.Engaged : Guide.Lost; // straight into the body, past the start, is wrong
-        if (_guide == Guide.Engaged && _deviation > guideLost) _guide = Guide.Lost;
+        if (_guide == Guide.Lost && _begun && _deviation <= 1) { _guide = Guide.Engaged; _ramp = 0; } // back on the path: the force comes back gently
+        if (_guide == Guide.Engaged)
+        {
+            _begun = true;
+            if (_deviation > guideLost) _guide = Guide.Lost;
+        }
 
         bool engaged = _guide == Guide.Engaged;
         _w = Mathf.MoveTowards(_w, engaged ? 1 : 0, guideEase * dt);
@@ -361,7 +381,8 @@ public class NeedleAction : MonoBehaviour
         _over = engaged ? Mathf.Max(0, a - length) : 0;
     }
 
-    // The indicator, on the message card: on the path, adjust, off the path, lost. Not while the card says something else.
+    // The indicator, on the message card: on the path, adjust, off the path, lost, or (before the stylus has been behind the box) to move it back.
+    // Not while the card says something else.
     void ShowGuide()
     {
         var band = _phase == Phase.None && (Current == State.Outside || Current == State.Inside) ? GuideBand : Band.None;
@@ -370,7 +391,7 @@ public class NeedleAction : MonoBehaviour
             if (_guideShown) { _guideShown = false; card.gameObject.SetActive(false); }
             return;
         }
-        int key = (int)band * 1000000 + (int)(_lat * 1000) * 1000 + (int)_ang; // redrawn when the band or the numbers change
+        int key = (int)band * 1000000 + (band == Band.Far ? 0 : (int)(_lat * 1000) * 1000 + (int)_ang); // redrawn when the band or the numbers change
         if (_guideShown && key == _guideKey) return;
         _guideShown = true;
         _guideKey = key;
@@ -381,7 +402,8 @@ public class NeedleAction : MonoBehaviour
             case Band.Good: Say($"<b>On the path</b>\n{numbers}", new Color(0.3f, 0.85f, 0.4f)); break;
             case Band.Close: Say($"<b>Adjust</b>\n{numbers}", new Color(1, 0.83f, 0)); break;
             case Band.Off: Say($"<b>Off the path</b>\n{numbers}", new Color(1, 0.5f, 0.3f)); break;
-            default: Say("<b>Off the path</b>\n<size=75%><color=#d5dce6>Force is off. Go back to the start point</color></size>", new Color(1, 0.35f, 0.3f)); break;
+            case Band.Far: Say("<b>Move the stylus back</b>\n<size=75%><color=#d5dce6>As far as it goes, then push in along the path</color></size>", new Color(0.45f, 0.75f, 1)); break;
+            default: Say($"<b>Off the path</b>\n<size=75%><color=#d5dce6>Force is off. {(_begun ? "Return to the path" : "Go back to the start point")}</color></size>", new Color(1, 0.35f, 0.3f)); break;
         }
     }
 

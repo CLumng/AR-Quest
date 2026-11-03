@@ -24,6 +24,8 @@ public class PanelModel
     public int step, steps; // progress dots: step of steps, 1-based; steps 0 = none
     public bool compact;    // only the title and the keys, in a narrower card
     public int columnsFrom, columnsCount; // rows[columnsFrom ..< columnsFrom + columnsCount] go in two columns (the first half down the left one) in a wider card; the others span it
+    public bool pad, padOn;   // a square cartesian plane under the text with a dot on it (the stylus' home); padOn = the dot is live, otherwise it is greyed
+    public Vector2 padPos;    // the dot, -1..1 on each axis: x to the right, y up
     public readonly List<Row> rows = new();
     public readonly List<Key> keys = new();
 
@@ -35,7 +37,8 @@ public class PanelModel
         title = body = badge = "";
         badgeColor = default;
         step = steps = columnsFrom = columnsCount = 0;
-        compact = false;
+        compact = pad = padOn = false;
+        padPos = default;
         rows.Clear();
         keys.Clear();
     }
@@ -48,7 +51,7 @@ public class PanelModel
     public bool Same(PanelModel o)
     {
         if (title != o.title || body != o.body || badge != o.badge || badgeColor != o.badgeColor || step != o.step || steps != o.steps ||
-            compact != o.compact || columnsFrom != o.columnsFrom || columnsCount != o.columnsCount || rows.Count != o.rows.Count || keys.Count != o.keys.Count) return false;
+            compact != o.compact || pad != o.pad || padOn != o.padOn || padPos != o.padPos || columnsFrom != o.columnsFrom || columnsCount != o.columnsCount || rows.Count != o.rows.Count || keys.Count != o.keys.Count) return false;
         for (int i = 0; i < rows.Count; i++)
         {
             Row a = rows[i], b = o.rows[i];
@@ -62,7 +65,7 @@ public class PanelModel
     public void CopyFrom(PanelModel o)
     {
         title = o.title; body = o.body; badge = o.badge; badgeColor = o.badgeColor;
-        step = o.step; steps = o.steps; compact = o.compact; columnsFrom = o.columnsFrom; columnsCount = o.columnsCount;
+        step = o.step; steps = o.steps; compact = o.compact; pad = o.pad; padOn = o.padOn; padPos = o.padPos; columnsFrom = o.columnsFrom; columnsCount = o.columnsCount;
         rows.Clear(); rows.AddRange(o.rows);
         keys.Clear(); keys.AddRange(o.keys);
     }
@@ -95,6 +98,9 @@ public class GlassPanel : MonoBehaviour
     public TMP_Text title, body, badgeText;
     public Image badgeBg;
     public GameObject badge, divider, rowsRoot; // badge = its whole row
+    public GameObject padRoot;                  // the pad's row, between the text and the menu rows
+    public RectTransform padDot;                // inside the pad: its anchor is where the dot is
+    public Image padDotImage;
     public RectTransform columns, left, right;  // inside rowsRoot: the two columns that the rows of a model's columns move into
     public Image[] dots;
     public RowView[] rows;
@@ -154,6 +160,11 @@ public class GlassPanel : MonoBehaviour
         body.gameObject.SetActive(m.body != "" && !m.compact);
         body.text = m.body;
         body.fontSize = 34 * t;
+
+        padRoot.SetActive(m.pad && !m.compact);
+        padDot.anchorMin = padDot.anchorMax = new Vector2(0.5f + 0.5f * Mathf.Clamp(m.padPos.x, -1, 1), 0.5f + 0.5f * Mathf.Clamp(m.padPos.y, -1, 1));
+        padDot.anchoredPosition = Vector2.zero;
+        padDotImage.color = m.padOn ? Accent : Muted;
 
         rowsRoot.SetActive(!m.compact && m.rows.Count > 0);
         columns.gameObject.SetActive(split);

@@ -10,12 +10,13 @@ using System.IO;
 public static class HapticProtocol
 {
     public const int Port = 5555;
-    public const byte StateType = 1, CommandType = 2, RunType = 3, SavedType = 4;
+    public const byte StateType = 1, CommandType = 2, RunType = 3, SavedType = 4, PerfType = 5;
     public const int MaxRunBytes = 32 << 20;         // the bridge refuses a run frame bigger than this: a garbled length must not allocate gigabytes
-    public const int StateSize = 1 + 4 + 4 + 4 + 4 + 12 + 64, CommandSize = 1 + 4 + 4 + 12;
+    public const int StateSize = 1 + 4 + 4 + 4 + 4 + 12 + 64, CommandSize = 1 + 4 + 4 + 12, PerfSize = 1 + 4 * 5;
 
     public const int Button1 = 1, Button2 = 2;       // StateFrame.buttons: the stylus' two buttons (HD_CURRENT_BUTTONS)
     public const int Inkwell = 1, ForceOn = 2;       // StateFrame.flags: stylus in the inkwell; the bridge is letting force out
+    public const int PerfOk = 4;                     // StateFrame.flags: this bridge takes PerfFrames (an old one drops the link at a frame it does not know)
     public const int Enable = 1;                     // CommandFrame.flags: the headset wants the force applied
 
     /// <summary>Bridge to headset: where the stylus is and what the bridge is doing. Sent about every 8 ms.</summary>
@@ -88,6 +89,32 @@ public static class HapticProtocol
             int n = r.ReadInt32();
             if (n < 0 || n > MaxRunBytes) throw new InvalidDataException($"a run of {n} bytes");
             csv = System.Text.Encoding.UTF8.GetString(r.ReadBytes(n));
+        }
+    }
+
+    /// <summary>
+    /// Headset to bridge, once a second: how the app ran in that second. The bridge shows it and logs it next to the headset's temperatures
+    /// (which only the PC can read, through adb). Sent only to a bridge that says it takes them (StateFrame.flags PerfOk).
+    /// </summary>
+    public sealed class PerfFrame
+    {
+        public float fps, frameMs, maxMs;   // frames per second, mean and worst frame time (ms)
+        public float refreshHz;             // the display's rate, 0 = unknown
+        public int late;                    // frames that took more than 1.5 display periods: a missed vsync
+
+        public void Write(BinaryWriter w)
+        {
+            w.Write(PerfType); w.Write(fps); w.Write(frameMs); w.Write(maxMs); w.Write(refreshHz); w.Write(late);
+        }
+
+        public void Read(BinaryReader r)
+        {
+            fps = r.ReadSingle(); frameMs = r.ReadSingle(); maxMs = r.ReadSingle(); refreshHz = r.ReadSingle(); late = r.ReadInt32();
+        }
+
+        public void CopyFrom(PerfFrame o)
+        {
+            fps = o.fps; frameMs = o.frameMs; maxMs = o.maxMs; refreshHz = o.refreshHz; late = o.late;
         }
     }
 

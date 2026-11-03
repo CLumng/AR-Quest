@@ -55,7 +55,8 @@ public static class GlassPanelCheck
             ("adjust", "Adjust", 0, 0, 0, true), ("done", "Done", 0, 0, 0, true),
             ("menu, action", "Menu", 0, 0, 0, true), ("menu, slider", "Menu", 0, 1, 0, true), ("menu, tester row", "Menu", 0, 2, 0, true), ("menu, last row", "Menu", 0, groups.Length + 2, 0, true),
             ("settings, calibrate", "Menu", 0, 0, 0, true), ("settings, size", "Menu", 0, 2, 0, true), ("settings, text size", "Menu", 0, 3, 0, true), // names that start with "settings" are the second menu page
-            ("settings, reset", "Menu", 0, 5, 0, true), ("settings, help mode", "Menu", 0, 6, 0, true), ("settings, strength", "Menu", 0, 7, 0, true),
+            ("settings, reset", "Menu", 0, 5, 0, true), ("settings, help mode", "Menu", 0, 6, 0, true), ("settings, strength", "Menu", 0, 7, 0, true), ("settings, move stylus", "Menu", 0, 8, 0, true),
+            ("move stylus, back", "Menu", 0, 0, 0, true), ("move stylus, height", "Menu", 0, 2, 0, true), // "move stylus": the fourth page, the stylus' pad under Settings
             ("tester, first layer", "Menu", 0, 1, 0, true), ("tester, long name", "Menu", 0, 5, 0, true), ("tester, bone", "Menu", 0, 8, 0, true), // "tester": the third page, with the layers in two columns (sel - 1 = the layer on the cube)
         };
         try
@@ -70,7 +71,7 @@ public static class GlassPanelCheck
                 Set("_index", s.index);
                 Set("_sel", s.sel);
                 Set("_rms", s.rms);
-                Set("_page", s.name.StartsWith("settings") ? 1 : s.name.StartsWith("tester") ? 2 : 0);
+                Set("_page", s.name.StartsWith("settings") ? 1 : s.name.StartsWith("tester") ? 2 : s.name.StartsWith("move") ? 3 : 0);
                 if (s.name.StartsWith("tester")) aligner.tester.Select(Math.Max(s.sel - 1, 0));
                 var m = new PanelModel();
                 describe.Invoke(aligner, new object[] { s.tracked, m });
@@ -228,11 +229,26 @@ public static class GlassPanelCheck
             menu.Set(page: 1, sel: 1);
             menu.Select();
             Expect("\"Adjust alignment\" starts the adjustment", menu.Step == "Adjust");
-            menu.Set(page: 1, sel: 7);
+            menu.Set(page: 1, sel: 8);
             menu.Move(-1);
             Expect("the cursor wraps from the last row of the settings page to its first", menu.Sel == 0);
             menu.Move(1);
-            Expect("and from the first row to the last", menu.Sel == 7);
+            Expect("and from the first row to the last", menu.Sel == 8);
+            menu.Select();
+            Expect("\"Move stylus\", the settings page's last row, opens the stylus' page on Back", menu.Page == 3 && menu.Sel == 0);
+            menu.Move(1);
+            Expect("its cursor wraps over three rows: Back, Reset to home, Height", menu.Sel == 2);
+            menu.Move(-1);
+            Expect("and back to Back", menu.Sel == 0);
+            menu.Set(page: 3, sel: 2);
+            menu.Select();
+            Expect("TRIGGER on the Height meter does nothing", menu.Page == 3 && menu.Sel == 2);
+            menu.Set(page: 3, sel: 0);
+            menu.Select();
+            Expect("Back returns to Settings on the row that opened the page", menu.Page == 1 && menu.Sel == 8);
+            menu.Set(page: 3, sel: 1);
+            menu.Back();
+            Expect("and so does B", menu.Page == 1 && menu.Sel == 8);
             menu.Set(page: 0, sel: 0);
             menu.Move(-1);
             Expect("the main page moves one row down", menu.Sel == 1);

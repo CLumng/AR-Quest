@@ -72,7 +72,14 @@ public static class NeedleHapticsCheck
         Expect($"at the end of each tissue, moving in, it is IdealCurve.py's curve: {End(Named("Skin")):F2} / 1.38, {End(Named("Subcutaneous fat")):F2} / 1.00, {End(Named("Interspinous ligament")):F2} / 3.62, {End(flavum):F2} / 19.18, {End(epidural):F2} / 3.40, {End(dura):F2} / 10.93 N",
             Mathf.Abs(End(Named("Skin")) - 1.38f) < 0.1f && Mathf.Abs(End(Named("Subcutaneous fat")) - 1.0f) < 0.1f && Mathf.Abs(End(Named("Interspinous ligament")) - 3.62f) < 0.1f &&
             Mathf.Abs(End(flavum) - 19.18f) < 0.15f && Mathf.Abs(End(epidural) - 3.4f) < 0.1f && Mathf.Abs(End(dura) - 10.93f) < 0.1f && Mathf.Abs(End(dura) - (920 * (dura.thickness - 1e-5f) + 4.21f * h.frictionSpeed + frictionAll)) < 1e-3f);
+        // The ideal curve (what the force graph draws in white) is IdealCurve.py's at its even speed: friction whole, a function of depth alone.
+        float IdealEnd(NeedleHaptics.Layer l) => -h.Ideal(l.start + l.thickness - 1e-5f);
+        Expect($"the ideal curve ends each tissue where IdealCurve.py does: flavum {IdealEnd(flavum):F2} / 19.18, dura {IdealEnd(dura):F2} / 10.93, epidural {IdealEnd(epidural):F2} / 3.40 N",
+            Mathf.Abs(IdealEnd(flavum) - 19.18f) < 0.15f && Mathf.Abs(IdealEnd(dura) - 10.93f) < 0.1f && Mathf.Abs(IdealEnd(epidural) - 3.4f) < 0.1f);
+        Expect($"it has the friction whole where the hand's real speed, at 1 mm/s, has a third of it: epidural {-h.Ideal(epidural.start + 0.001f):F3} vs {-h.Force(epidural.start + 0.001f, 0.001f):F3} N",
+            Mathf.Abs(-h.Ideal(epidural.start + 0.001f) - (frictionToFlavum + 0.5f)) < 0.01f && -h.Force(epidural.start + 0.001f, 0.001f) < frictionToFlavum / 2);
         foreach (var l in scaled) l.scaleTo = 3;
+        Expect($"scaled, the ideal curve peaks at 3 N too (flavum {-h.Ideal(flavum.start + flavum.thickness - 1e-5f):F3})", Mathf.Abs(-h.Ideal(flavum.start + flavum.thickness - 1e-5f) - 3) < 0.015f);
         var inter = Named("Interspinous ligament");
         float flavumPeak = h.TissuePeak(System.Array.IndexOf(h.layers, flavum)), duraPeak = h.TissuePeak(System.Array.IndexOf(h.layers, dura));
         Expect($"scaled, every one of them peaks at 3 N, moving in: ligaments {End(inter):F3}, flavum {End(flavum):F3}, epidural {End(epidural):F3}, dura {End(dura):F3} (the formula's 3.62, {flavumPeak:F2}, 3.40, {duraPeak:F2})",

@@ -1,8 +1,10 @@
-"""Haptic Bridge window: Start / Stop, what the headset link and the stylus are doing, and the force limit.
+"""Haptic Bridge window: Start / Stop, what the headset link and the stylus are doing, the force limit, and the headset's performance.
 
-The bridge itself (the Touch through hd.dll, the TCP link to the headset, the force) is Bridge.cs; this window runs it as a child
-process (HapticBridge.exe --ui) and only shows what it says. Double-click this file, or:  python HapticBridge.pyw [--sim] [--autostart]
-Options: --sim  --autostart  --port N  --max-force N  --no-force  --no-adb; any other (--adb PATH, --tau MS, --runs-dir PATH) goes to the bridge as it is.
+The bridge itself (the Touch through hd.dll, the TCP link to the headset, the force, the temperatures read through adb and the performance
+log) is Bridge.cs; this window runs it as a child process (HapticBridge.exe --ui) and only shows what it says. Double-click this file, or:
+python HapticBridge.pyw [--sim] [--autostart]
+Options: --sim  --autostart  --port N  --max-force N  --no-force  --no-adb; any other (--adb PATH, --tau MS, --runs-dir PATH, --perf-dir PATH,
+--sensors-file PATH) goes to the bridge as it is.
 --selftest starts the simulated stylus, checks the window against it and exits (0 = fine).
 """
 import argparse
@@ -10,8 +12,10 @@ import ctypes
 import json
 import os
 import queue
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import tkinter as tk
@@ -23,8 +27,21 @@ EXE = os.path.join(HERE, "bin", "Release", "net10.0-windows", "HapticBridge.exe"
 SOURCES = [os.path.join(HERE, "Bridge.cs"), os.path.join(HERE, "HapticBridge.csproj"),
            os.path.join(HERE, "..", "Assets", "Scripts", "HapticLink", "HapticProtocol.cs")]
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-GREEN, AMBER, GRAY = "#2ea043", "#bf8700", "#6e7681"
+GREEN, AMBER, GRAY, RED = "#2ea043", "#bf8700", "#6e7681", "#d1242f"
 MAX_LIMIT = 3.0
+THERMAL = ("none", "light", "moderate", "severe", "critical", "emergency", "shutdown")  # Android's thermal status, 0..6
+SENSORS_FIXTURE = os.path.join(HERE, "tests", "quest3-sensors.txt")                   # a real reading of a Quest 3, for --selftest
+
+
+def num(v, spec=".1f"):
+    return "-" if v is None else format(v, spec)
+
+
+def heat(value, limit):
+    """Colour of a temperature against where the OS starts to throttle: green below 80 % of it, amber below 92 %, red from there."""
+    if value is None or not limit:
+        return ""
+    return GREEN if value < 0.8 * limit else AMBER if value < 0.92 * limit else RED
 
 
 def build():
@@ -44,8 +61,8 @@ class App:
         root.title("Haptic Bridge")
         root.report_callback_exception = lambda *e: self.log("".join(traceback.format_exception(*e)))
         k = root.winfo_fpixels("1i") / 96  # the screen's scale, so the window is not tiny on a high-DPI display
-        root.geometry(f"{int(440 * k)}x{int(700 * k)}")
-        root.minsize(int(440 * k), int(560 * k))
+        root.geometry(f"{int(520 * k)}x{int(900 * k)}")
+        root.minsize(int(520 * k), int(780 * k))
         ttk.Style().configure("Big.TButton", font=("Segoe UI Semibold", 11), padding=(8, 10))
 
         self.sim = tk.BooleanVar(value=args.sim)
@@ -53,7 +70,7 @@ class App:
         self.port = tk.StringVar(value=str(args.port))
         self.force = tk.BooleanVar(value=not args.no_force)
         self.limit = tk.StringVar(value=f"{args.max_force:.1f}")
-        self.text = {n: tk.StringVar(value="-") for n in ("link", "traffic", "tip", "buttons", "applied")}
+        self.text = {n: tk.StringVar(value="-") for n in ("link", "traffic", "tip", "buttons", "applied", "app", "cpu", "gpu", "battery", "board", "clocks", "log")}
 
         main = ttk.Frame(root, padding=12)
         main.pack(fill="both", expand=True)
@@ -72,6 +89,13 @@ class App:
         box = self.box(main, "Headset")
         self.add(box, "Link", ttk.Label, textvariable=self.text["link"], **mono)
         self.add(box, "Traffic", ttk.Label, textvariable=self.text["traffic"], **mono)
+        box = self.box(main, "Performance")
+        self.add(box, "App", ttk.Label, textvariable=self.text["app"], **mono)
+        self.heat = {n: self.add(box, title, ttk.Label, textvariable=self.text[n], **mono)  # coloured by how close they are to throttling
+                     for n, title in (("cpu", "CPU °C"), ("gpu", "GPU °C"), ("battery", "Battery °C"))}
+        self.add(box, "Board °C", ttk.Label, textvariable=self.text["board"], **mono)
+        self.add(box, "Clocks", ttk.Label, textvariable=self.text["clocks"], **mono)
+        self.add(box, "Log", ttk.Label, textvariable=self.text["log"], **mono)
         box = self.box(main, "Stylus")
         self.add(box, "Tip (mm)", ttk.Label, textvariable=self.text["tip"], **mono)
         self.add(box, "Buttons", ttk.Label, textvariable=self.text["buttons"], **mono)
@@ -258,6 +282,8 @@ class App:
         if not (running and s):
             for v in self.text.values():
                 v.set("-")
+            for w in self.heat.values():
+                w.configure(foreground="")
             self.text["applied"].set("0.00 N")
             self.bar["value"] = 0
             return
@@ -270,6 +296,32 @@ class App:
         t["buttons"].set(f"1 {'ON ' if b & 1 else 'off'}  2 {'ON ' if b & 2 else 'off'}" + ("  in the inkwell" if s["inkwell"] else ""))
         t["applied"].set(f"{s['force']:.2f} N  ({s['fx']:.2f} {s['fy']:.2f} {s['fz']:.2f})")
         self.bar["value"] = min(max(s["force"] / max(self.limit_value(), 0.01) * 100, 0), 100)
+        self.render_performance(s)
+
+    def render_performance(self, s):
+        """The app's last second (sent by the headset) and the headset's sensors (read by the bridge through adb)."""
+        t, p, z = self.text, s.get("perf"), s.get("sensors")
+        t["app"].set(f"{p['fps']:.1f} fps  {p['frameMs']:.1f} ms  max {p['maxMs']:.1f}  late {p['late']}" + (f"  {p['refreshHz']:.0f} Hz" if p["refreshHz"] else "")
+                     if p else "no data from the app")
+        if not z:
+            for n in ("cpu", "gpu", "battery", "board", "clocks"):
+                t[n].set("no reading (needs adb)" if n == "cpu" else "-")
+            for w in self.heat.values():
+                w.configure(foreground="")
+        else:
+            limit = lambda v: f"  throttles at {v:.0f}" if v else ""
+            t["cpu"].set(f"{num(z['cpuMax'])} max  {num(z['cpuAvg'])} avg" + limit(z["cpuLimit"]))
+            t["gpu"].set(f"{num(z['gpuMax'])} max  {num(z['gpuAvg'])} avg" + limit(z["gpuLimit"]))
+            t["battery"].set(f"{num(z['battery'])} cell  {num(z['battVirt'])} virtual" + limit(z["battVirtLimit"])
+                             + (f"  {z['batteryPct']}%" if z["batteryPct"] is not None else "") + ("  charging" if z["charging"] else ""))
+            t["board"].set(f"SoC {num(z['soc'])}  PCB {num(z['pcb'])}  surface {num(z['surface'])}  display {num(z['display'])}")
+            status = z["status"]
+            t["clocks"].set(f"CPU {num(z['cpuMHz'], '.0f')} MHz  GPU {num(z['gpuMHz'], '.0f')} MHz {num(z['gpuBusy'], '.0f')}%  fan {num(z['fan'], '.0f')}"
+                            f"  thermal {THERMAL[status] if status is not None and 0 <= status < len(THERMAL) else '-'}")
+            self.heat["cpu"].configure(foreground=heat(z["cpuMax"], z["cpuLimit"]))
+            self.heat["gpu"].configure(foreground=heat(z["gpuMax"], z["gpuLimit"]))
+            self.heat["battery"].configure(foreground=heat(z["battVirt"], z["battVirtLimit"]))
+        t["log"].set(f"{os.path.basename(s['perfFile'])}  ({s['perfRows']} rows)" if s.get("perfFile") else "-")
 
 
 def selftest(root, app):
@@ -280,12 +332,21 @@ def selftest(root, app):
             assert time.time() < end, f"timed out waiting for: {what}"
             root.update()
             time.sleep(0.02)
+    perf_dir = tempfile.mkdtemp(prefix="HapticBridgeSelfTest-")
     try:
         app.sim.set(True)
         app.usb.set(False)
+        app.extra = ["--sensors-file", SENSORS_FIXTURE, "--perf-dir", perf_dir]  # a real Quest 3 reading instead of adb
         app.toggle()
         wait(lambda: app.last, "the first status")
         assert app.status.cget("text") == "● Waiting for the headset", app.status.cget("text")
+        wait(lambda: app.last["sensors"] and app.last["perfRows"] >= 2, "the sensors and two rows of the log")
+        assert app.text["cpu"].get() == "40.6 max  40.3 avg  throttles at 89", app.text["cpu"].get()
+        assert app.text["battery"].get() == "37.0 cell  39.3 virtual  throttles at 58  99%  charging", app.text["battery"].get()
+        assert "thermal none" in app.text["clocks"].get() and "CPU 1920 MHz" in app.text["clocks"].get(), app.text["clocks"].get()
+        assert str(app.heat["cpu"].cget("foreground")) == GREEN and app.text["app"].get() == "no data from the app"
+        lines = open(app.last["perfFile"], encoding="utf-8").read().splitlines()
+        assert lines[0].count(";") == lines[1].count(";") == 24 and lines[1].split(";")[2] == "0", lines[:2]  # 25 columns, no app numbers yet
         tip = app.last["m"][12]
         wait(lambda: abs(app.last["m"][12] - tip) > 1, "the simulated tip to move")
         app.limit.set("2.5")
@@ -301,6 +362,8 @@ def selftest(root, app):
         if app.proc:
             app.proc.kill()
         return 1
+    finally:
+        shutil.rmtree(perf_dir, ignore_errors=True)
     print("OK")
     return 0
 

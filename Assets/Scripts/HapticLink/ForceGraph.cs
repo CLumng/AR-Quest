@@ -12,7 +12,8 @@ using UnityEngine.UI;
 /// needle comes out of the model, before the extraction is over, the run is dropped and nothing is drawn. Once it is complete, the graph
 /// appears when the user has taken the needle out of the model and turned the forces off, on a card in front of them. It is drawn like the
 /// ideal curve (Python/IdealCurve.py): force against depth, over a band per tissue of the table with a dotted line where each one starts;
-/// the tissues' formula force (before scaling) and the force sent to the stylus along the needle, + = against the advance. Only the
+/// the ideal curve of the tissues' formula (white: an even advance, a function of depth alone, NeedleHaptics.Ideal; the CSV's formula_N is
+/// the formula at the hand's real speed) and the force sent to the stylus along the needle (yellow), + = against the advance. Only the
 /// insertion is drawn: during the fluid extraction the needle stands still (the CSV has it all).
 /// A (or the stylus' button 1, see NeedleAction.Toggle) closes it; a new puncture with the forces on starts over. The card is out of the
 /// way while the menu is open. All UI text is English.
@@ -30,6 +31,12 @@ public class ForceGraph : MonoBehaviour
         public float side;   // N across the needle
         public float table;  // N the tissue's formula gives along the needle before scaling to the device, + = against the advance
         public bool fluid;   // the fluid is being extracted
+        public NeedleAction.State state;
+        public Vector3 tip;      // m, the needle's tip in the model's frame: the tip's trajectory
+        public float off;        // m, how far the tip is from the ideal path's line
+        public float toTarget;   // m, from the tip to the target
+        public float angle;      // degrees between the needle and the ideal path
+        public float rtt, age, frame; // ms: command to acknowledgement over the link, how old the stylus' pose was when read, the frame's length
     }
 
     public enum Mode { Idle, Recording, Done, Shown }
@@ -47,6 +54,7 @@ public class ForceGraph : MonoBehaviour
     public float distance = 0.75f;         // m in front of the user's head where the card appears
 
     public const int MaxSamples = 40000;   // about 8 minutes at 72 Hz; a longer run is cut here
+    public const int IdealPoints = 400;    // the ideal curve is drawn from this many depths between the skin and the deepest point
     public const float ReentrySeconds = 1; // a needle that was out of the model for less than this is not starting a new puncture after a complete run
 
     // The tissues' colours (the bands under the lines and the legend), by their index in the table.
@@ -124,21 +132,53 @@ public class ForceGraph : MonoBehaviour
     /// <summary>
     /// The run as CSV text, one row per frame: time (s), depth (mm), tissue the tip is in, phase (insertion or fluid), the force the tissue's
     /// formula gives along the needle before scaling (N), the force sent to the stylus along the needle (N, + = against the advance) and
-    /// across it (N).
+    /// across it (N). For the system's characterization (Python/Characterization.py) each row also has the needle's state, its tip in the
+    /// model's frame (mm: the trajectory), the tip's distance to the ideal path's line and to the target (mm), the angle to the path
+    /// (degrees), and the link's timing (ms): round trip, age of the stylus' pose, frame length. The last six columns (meta_) are
+    /// constants of the run and only the first row has them: see Meta.
     /// </summary>
     public string Csv()
     {
-        var sb = new StringBuilder("time_s;depth_mm;tissue;phase;formula_N;along_N;side_N\r\n");
+        var sb = new StringBuilder("time_s;depth_mm;tissue;phase;formula_N;along_N;side_N;state;tip_x_mm;tip_y_mm;tip_z_mm;off_mm;target_mm;angle_deg;rtt_ms;age_ms;frame_ms;" +
+            "meta_reg_res_mm;meta_reg_moved_mm;meta_reg_turned_deg;meta_landmarks_mm;meta_entry_mm;meta_target_mm\r\n");
         var layers = needle != null && needle.haptics != null ? needle.haptics.layers : null;
-        foreach (var s in _samples)
+        string[] meta = Meta();
+        for (int i = 0; i < _samples.Count; i++)
         {
+            var s = _samples[i];
             int layer = LayerOf(s.depth);
             string tissue = layer < 0 ? "" : layers[layer].name;
             if (tissue.IndexOfAny(new[] { ';', '"' }) >= 0) tissue = "\"" + tissue.Replace("\"", "\"\"") + "\"";
             sb.Append(Num(s.t, "0.####")).Append(';').Append(Num(s.depth * 1000, "0.###")).Append(';').Append(tissue).Append(';').Append(s.fluid ? "fluid" : "insertion").Append(';')
-              .Append(Num(s.table, "0.#####")).Append(';').Append(Num(s.along, "0.#####")).Append(';').Append(Num(s.side, "0.#####")).Append("\r\n");
+              .Append(Num(s.table, "0.#####")).Append(';').Append(Num(s.along, "0.#####")).Append(';').Append(Num(s.side, "0.#####")).Append(';')
+              .Append(s.state).Append(';').Append(Num(s.tip.x * 1000, "0.###")).Append(';').Append(Num(s.tip.y * 1000, "0.###")).Append(';').Append(Num(s.tip.z * 1000, "0.###")).Append(';')
+              .Append(Num(s.off * 1000, "0.###")).Append(';').Append(Num(s.toTarget * 1000, "0.###")).Append(';').Append(Num(s.angle, "0.##")).Append(';')
+              .Append(Num(s.rtt, "0.##")).Append(';').Append(Num(s.age, "0.##")).Append(';').Append(Num(s.frame, "0.##"))
+              .Append(i == 0 ? ";" + string.Join(";", meta) : ";;;;;;").Append("\r\n");
         }
         return sb.ToString();
+    }
+
+    // The run's constants, for the first row: the residual of each landmark in the last fit (mm, space separated), how far the model has been
+    // moved since that fit (mm, degrees), and, in the model's frame (mm), the landmarks (x y z, separated by |), the ideal path's entry and the
+    // target. They are what the analysis needs to estimate the registration error at the target. Empty where they are not known.
+    string[] Meta()
+    {
+        var meta = new[] { "", "", "", "", "", "" };
+        var aligner = stylus != null ? stylus.aligner : null;
+        if (aligner != null && aligner.Registration(out var residuals, out float moved, out float turned))
+        {
+            meta[0] = string.Join(" ", System.Array.ConvertAll(residuals, r => Num(r * 1000, "0.###")));
+            meta[1] = Num(moved * 1000, "0.###");
+            meta[2] = Num(turned, "0.###");
+        }
+        var model = needle != null ? needle.model : null;
+        if (model == null) return meta;
+        string P(Vector3 world) { var v = model.transform.InverseTransformPoint(world) * 1000; return Num(v.x, "0.###") + " " + Num(v.y, "0.###") + " " + Num(v.z, "0.###"); }
+        if (model.landmarks != null) meta[3] = string.Join("|", System.Array.ConvertAll(model.landmarks, l => P(l.point.position)));
+        if (model.pathEntry != null) meta[4] = P(model.pathEntry.position);
+        if (model.pathTarget != null) meta[5] = P(model.pathTarget.position);
+        return meta;
     }
 
     // The run is complete: a copy on the headset, and the same text to the PC (it keeps trying until the bridge says it is saved).
@@ -196,11 +236,22 @@ public class ForceGraph : MonoBehaviour
         var force = stylus.SentWorld;
         var dir = needle.Dir;
         float along = Vector3.Dot(force, dir);
-        Add(new Sample
+        var s = new Sample
         {
             t = _t, depth = needle.Depth, along = -along, side = (force - dir * along).magnitude,
             table = needle.haptics != null ? -needle.haptics.Axial : 0, fluid = needle.Current == NeedleAction.State.Extracting,
-        });
+            state = needle.Current, rtt = stylus.RoundTripMs, age = stylus.StateAgeMs, frame = dt * 1000,
+        };
+        var model = needle.model;
+        if (model != null && model.pathEntry != null && model.pathTarget != null)
+        {
+            Vector3 tip = needle.Tip, entry = model.pathEntry.position, goal = model.pathTarget.position, axis = (goal - entry).normalized;
+            s.tip = model.transform.InverseTransformPoint(tip);
+            s.off = Vector3.Cross(tip - entry, axis).magnitude;
+            s.toTarget = (tip - goal).magnitude;
+            s.angle = Vector3.Angle(dir, axis);
+        }
+        Add(s);
     }
 
     void Show()
@@ -252,10 +303,23 @@ public class ForceGraph : MonoBehaviour
         foreach (var s in run)
         {
             D = Mathf.Max(D, s.depth);
-            lo = Mathf.Min(lo, Mathf.Min(s.along, s.table));
-            hi = Mathf.Max(hi, Mathf.Max(s.along, s.table));
+            lo = Mathf.Min(lo, s.along);
+            hi = Mathf.Max(hi, s.along);
         }
         D = Mathf.Max(D, 0.001f);
+        // The white line is the ideal curve: the formula at an even speed as a function of depth alone (NeedleHaptics.Ideal), not the
+        // formula at the hand's speed of each frame, which carries the hand's steps and the friction flipping with them.
+        var curve = run;
+        if (layers.Length > 0)
+        {
+            curve = new List<Sample>(IdealPoints + 1);
+            for (int k = 0; k <= IdealPoints; k++) curve.Add(new Sample { depth = D * k / IdealPoints, table = -needle.haptics.Ideal(D * k / IdealPoints) });
+        }
+        foreach (var s in curve)
+        {
+            lo = Mathf.Min(lo, s.table);
+            hi = Mathf.Max(hi, s.table);
+        }
         float ys = Nice(Mathf.Max(hi - lo, 0.1f) / 7);
         float ymin = lo > -0.1f * ys ? 0 : Mathf.Floor(lo / ys) * ys; // a whisper below zero does not earn a row of the axis (the margin shows it)
         float ymax = Mathf.Max(Mathf.Ceil(hi / ys) * ys, ymin + ys);
@@ -296,7 +360,7 @@ public class ForceGraph : MonoBehaviour
                 for (int y = 0; y < H; y++) Over(ref _pixels[y * W + x], white, 0.07f);
         }
 
-        Stroke(run, s => s.table, 2.4f, FormulaColor, X, Y);
+        Stroke(curve, s => s.table, 2.4f, FormulaColor, X, Y);
         Stroke(run, s => s.along, 1.4f, AlongColor, X, Y); // thinner, on top: where the two are the same (scale 1) both still show
 
         _tex.SetPixelData(_pixels, 0);
@@ -325,14 +389,11 @@ public class ForceGraph : MonoBehaviour
         {
             int peak = 0;
             float sent = 0;
-            for (int i = 0; i < n; i++)
-            {
-                if (run[i].table > run[peak].table) peak = i;
-                sent = Mathf.Max(sent, run[i].along);
-            }
-            int where = LayerOf(run[peak].depth);
-            summary.text = $"Peak <b>{Num(run[peak].table, "0.00")} N</b> in {(where < 0 ? "the skin" : layers[where].name)} at {Num(run[peak].depth * 1000, "0.#")} mm   ·   {Num(_samples[_samples.Count - 1].t, "0")} s in all\n" +
-                $"<color=#EFF4FA>Needle force</color> (the tissues' formula)   <color=#FFD400>Sent to the stylus</color> (peak {Num(sent, "0.00")} N)";
+            for (int i = 0; i < curve.Count; i++) if (curve[i].table > curve[peak].table) peak = i;
+            for (int i = 0; i < n; i++) sent = Mathf.Max(sent, run[i].along);
+            int where = LayerOf(curve[peak].depth);
+            summary.text = $"Peak <b>{Num(curve[peak].table, "0.00")} N</b> in {(where < 0 ? "the skin" : layers[where].name)} at {Num(curve[peak].depth * 1000, "0.#")} mm   ·   {Num(_samples[_samples.Count - 1].t, "0")} s in all\n" +
+                $"<color=#EFF4FA>Ideal needle force</color> (the tissues' formula)   <color=#FFD400>Sent to the stylus</color> (peak {Num(sent, "0.00")} N)";
         }
     }
 

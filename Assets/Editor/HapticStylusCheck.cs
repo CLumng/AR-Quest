@@ -1,5 +1,7 @@
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Text;
 using TMPro;
@@ -135,6 +137,66 @@ public static class HapticStylusCheck
             stylus.Inject(State(Vector3.zero), live: false);
             stylus.Tick(0.02f);
             Expect("so does losing the link", !stylus.ForcesOn);
+
+            // ---- moving home: the menu's "Move stylus" page (the XZ plane on the pad, Y on the height meter), kept between sessions, reset to home ----
+            {
+                var mover = Make("mover", active: false).AddComponent<HapticStylus>();
+                var h = Make("mover home").transform;
+                var start = new Vector3(0.4f, 1.1f, 2f);
+                h.SetPositionAndRotation(start, Quaternion.Euler(0, 180, 0));
+                mover.home = h;
+                var key = (string)typeof(HapticStylus).GetField("Key", BindingFlags.NonPublic | BindingFlags.Static).GetRawConstantValue();
+                string keptPrefs = PlayerPrefs.GetString(key, ""); // the Editor's own save of the home point: put back at the end
+                PlayerPrefs.DeleteKey(key);
+                Vector3 east = Vector3.right, ahead = Vector3.forward;
+                var startMethod = typeof(HapticStylus).GetMethod("Start", BindingFlags.NonPublic | BindingFlags.Instance);
+                try
+                {
+                    mover.Inject(State(Vector3.zero, flags: HapticProtocol.Inkwell));
+                    Expect("in the inkwell home can be moved", mover.CanMove);
+                    Expect("across the plane: x to the user's right, y away from them", mover.Move(new Vector2(0.03f, 0.05f), 0, east, ahead) && Near(h.position, start + new Vector3(0.03f, 0, 0.05f)));
+                    Expect("and Y does not move with it (only the XZ plane)", Is(h.position.y, start.y, 1e-6f) && Near(mover.Shift(east, ahead), new Vector3(0.03f, 0, 0.05f)));
+                    mover.Move(Vector2.zero, 0.04f, east, ahead);
+                    Expect("the height meter lifts it 4 cm, the plane stays", Near(mover.Shift(east, ahead), new Vector3(0.03f, 0.04f, 0.05f)));
+                    mover.Move(new Vector2(1, -1), 1, east, ahead);
+                    Expect("it stops at padRange across and levelRange up", Near(mover.Shift(east, ahead), new Vector3(mover.padRange, mover.levelRange, -mover.padRange)));
+                    mover.Move(new Vector2(-5, 5), -5, east, ahead);
+                    Expect("and at the other end", Near(mover.Shift(east, ahead), new Vector3(-mover.padRange, -mover.levelRange, mover.padRange)));
+                    Expect("home is turned as it was: only its place moved", Mathf.Abs(Mathf.DeltaAngle(h.eulerAngles.y, 180)) < 0.01f);
+                    Expect("reset to home puts it where it started, in the inkwell", mover.ResetHome() && Near(h.position, start) && Near(mover.Shift(east, ahead), Vector3.zero));
+                    mover.Move(new Vector2(0.01f, 0.02f), 0, Vector3.back, Vector3.right); // the user turned: their right is the world's -Z, away from them is +X
+                    Expect("the pad follows where the user stands (they look along +X)", Near(h.position, start + new Vector3(0.02f, 0, -0.01f)));
+                    mover.ResetHome();
+
+                    mover.Inject(State(Vector3.zero));
+                    Expect("with the stylus out of the inkwell it cannot be moved", !mover.CanMove && !mover.Move(new Vector2(0.03f, 0.05f), 0.02f, east, ahead) && Near(h.position, start));
+                    h.position = start + new Vector3(0.02f, 0, 0);
+                    Expect("nor reset (the needle would jump under the hand)", !mover.ResetHome() && Near(h.position, start + new Vector3(0.02f, 0, 0)));
+                    mover.Inject(State(Vector3.zero), live: false);
+                    Expect("without data from the stylus it can (the controller holds the needle)", mover.CanMove && mover.ResetHome() && Near(h.position, start));
+
+                    mover.Inject(State(Vector3.zero, flags: HapticProtocol.Inkwell));
+                    mover.Move(new Vector2(0.02f, -0.01f), 0.03f, east, ahead);
+                    var moved = h.position;
+                    mover.Tick(0.02f);
+                    Expect("while it moves nothing is saved yet", PlayerPrefs.GetString(key, "") == "");
+                    mover.Tick(0.02f);
+                    Expect("once it has stopped the place is saved", PlayerPrefs.GetString(key, "") != "");
+                    h.SetPositionAndRotation(start, Quaternion.Euler(0, 180, 0));
+                    startMethod.Invoke(mover, null);
+                    Expect("the next session starts where it was left", Near(h.position, moved));
+                    mover.ResetHome();
+                    mover.Tick(0.02f);
+                    mover.Tick(0.02f);
+                    h.SetPositionAndRotation(start, Quaternion.Euler(0, 180, 0));
+                    startMethod.Invoke(mover, null);
+                    Expect("and after a reset it starts at home", Near(h.position, start));
+                }
+                finally
+                {
+                    if (keptPrefs == "") PlayerPrefs.DeleteKey(key); else PlayerPrefs.SetString(key, keptPrefs);
+                }
+            }
 
             // ---- the force's way out ----
             stylus.Inject(State(Vector3.zero));
@@ -441,7 +503,33 @@ public static class HapticStylusCheck
             string[] lines = files.Length == 1 ? File.ReadAllText(files[0]).Split(new[] { "\r\n" }, System.StringSplitOptions.RemoveEmptyEntries) : new string[0];
             Expect($"the complete run is saved as a CSV ({files.Length} file, {lines.Length - 1} rows for {graph.Samples.Count} samples)", files.Length == 1 && lines.Length == graph.Samples.Count + 1 && File.ReadAllText(files[0]) == graph.Csv());
             Expect($"with a header and one row per frame, separated by ';': {(lines.Length > 1 ? lines[0] + " | " + lines[1] : "")}",
-                lines.Length > 1 && lines[0] == "time_s;depth_mm;tissue;phase;formula_N;along_N;side_N" && lines[1].Split(';').Length == 7 && lines[1].Split(';')[3] == "insertion" && lines[1].Split(';')[2] == "a");
+                lines.Length > 1 && lines[0].StartsWith("time_s;depth_mm;tissue;phase;formula_N;along_N;side_N;state;tip_x_mm;") && lines[0].Split(';').Length == 23
+                && lines[1].Split(';').Length == 23 && lines[1].Split(';')[3] == "insertion" && lines[1].Split(';')[2] == "a");
+            // the characterization columns: the tip in the model's frame (the check's model is at the origin, the path along +Z from 0 to 5 cm), distances, state
+            var rows = new List<string[]>();
+            for (int i = 1; i < lines.Length; i++) rows.Add(lines[i].Split(';'));
+            var deepest = rows.FindAll(r => r[3] == "insertion").OrderBy(r => float.Parse(r[1], CultureInfo.InvariantCulture)).Last();
+            Expect($"each row has the tip in the model's frame and its distance to the target: at {deepest[1]} mm the tip is at z {deepest[10]} mm, {deepest[12]} mm from the target",
+                Is(float.Parse(deepest[10], CultureInfo.InvariantCulture), 50, 2) && Is(float.Parse(deepest[12], CultureInfo.InvariantCulture), 0, 2) && float.Parse(deepest[11], CultureInfo.InvariantCulture) < 2);
+            Expect($"the state is named ({rows[0][7]} ... {rows[rows.Count - 1][7]}), the link's timing is there (no link here: rtt {rows[0][14]}, age {rows[0][15]}) and the frame is 20 ms ({rows[0][16]})",
+                rows[0][7] == "Inside" && rows[rows.Count - 1][7] == "Extracting" && Is(float.Parse(rows[0][16], CultureInfo.InvariantCulture), 20, 0.01f));
+            Expect($"only the first row has the run's constants: the path's entry ({rows[0][21]}) and the target ({rows[0][22]}); no landmarks or fit here",
+                rows[0][21] == "0 0 0" && rows[0][22] == "0 0 50" && rows[0][18] == "" && rows.Skip(1).All(r => r.Skip(17).All(c => c == "")));
+            // with a landmark fit (its residuals and the pose it gave the model, set by hand) and the model 3 mm off that pose, they are in too
+            var aligner = Make("aligner").AddComponent<LandmarkAligner>();
+            aligner.model = model;
+            var bindings = BindingFlags.NonPublic | BindingFlags.Instance;
+            typeof(LandmarkAligner).GetField("_residuals", bindings).SetValue(aligner, new[] { 0.001f, 0.002f, 0.0015f, 0.0005f });
+            typeof(LandmarkAligner).GetField("_fitPose", bindings).SetValue(aligner, new Pose(model.transform.position + new Vector3(0.003f, 0, 0), model.transform.rotation));
+            var landmark = Make("landmark").transform;
+            landmark.position = new Vector3(0.01f, 0.02f, 0.03f);
+            model.landmarks = new[] { new ModelTarget.Landmark { point = landmark } };
+            stylus.aligner = aligner;
+            var meta = graph.Csv().Split(new[] { "\r\n" }, System.StringSplitOptions.RemoveEmptyEntries)[1].Split(';');
+            Expect($"with a landmark fit the first row has each residual ({meta[17]}), how far the model moved since ({meta[18]} mm, {meta[19]} deg) and the landmarks ({meta[20]})",
+                meta[17] == "1 2 1.5 0.5" && meta[18] == "3" && meta[19] == "0" && meta[20] == "10 20 30");
+            stylus.aligner = null; // the later comparisons with the saved file are without them
+            model.landmarks = null;
             Expect("the extraction rows say so", lines.Length > 1 && lines[lines.Length - 1].Split(';')[3] == "fluid" && lines[lines.Length - 1].Split(';')[2] == "b");
             Press2(outside);
             Expect("the needle is out and the forces are off: the graph is shown on its card", !stylus.ForcesOn && graph.Visible && graph.card.gameObject.activeSelf);
@@ -534,8 +622,24 @@ public static class HapticStylusCheck
             Expect("10 mm off: off the path, the force is still there", action.GuideBand == NeedleAction.Band.Off && action.message.text.Contains("Off the path") && !action.message.text.Contains("Force is off"));
             Hold(new Vector3(0.014f, 0, -0.01f));
             Expect("14 mm off: lost, the force is off", action.GuideBand == NeedleAction.Band.Lost && action.message.text.Contains("Force is off"));
+            Hold(new Vector3(0.014f, 0, 0.01f));
+            Expect("lost: no force, the needle is not in, the card says to return to the path", action.GuideBand == NeedleAction.Band.Lost && action.Current == NeedleAction.State.Outside && stylus.SentForce == Vector3.zero && action.message.text.Contains("Return to the path"));
+            Hold(new Vector3(0.0085f, 0, 0.01f));
+            Expect("8.5 mm off is not back on the path yet (still lost)", action.GuideBand == NeedleAction.Band.Lost);
             Hold(new Vector3(0, 0, 0.01f));
-            Expect("back on the path it stays lost: no force, the needle is not in", action.GuideBand == NeedleAction.Band.Lost && action.Current == NeedleAction.State.Outside && stylus.SentForce == Vector3.zero);
+            Expect("back on the path, inside the box, it picks up again: in, on the path, force coming back gently", action.GuideBand == NeedleAction.Band.Good && action.Current == NeedleAction.State.Inside && stylus.SentForce.magnitude < 0.1f);
+            Hold(new Vector3(0.006f, 0, 0.01f));
+            Expect("and then the hand is pulled toward the path", stylus.SentForce.x < 0);
+            Hold(new Vector3(0.05f, 0, 0.03f));
+            Expect("out of the box (5 cm to the side): not judged, no indicator, no force", action.GuideBand == NeedleAction.Band.None && !action.MessageShown && action.Current == NeedleAction.State.Outside && stylus.SentForce == Vector3.zero);
+            Hold(new Vector3(0.02f, 0, 0.03f));
+            Expect("back in the box but 2 cm off the path: lost, told to return to it", action.GuideBand == NeedleAction.Band.Lost && action.message.text.Contains("Return to the path"));
+            Hold(new Vector3(0, 0, 0.03f));
+            Expect("on the path again: the session goes on in the body", action.GuideBand == NeedleAction.Band.Good && action.Current == NeedleAction.State.Inside);
+            Hold(new Vector3(0, 0, 0.14f));
+            Expect("past the box's far end (5 cm beyond the target): out of it", action.GuideBand == NeedleAction.Band.None && action.Current == NeedleAction.State.Outside);
+            Hold(new Vector3(0, 0, 0.05f));
+            Expect("and coming back to the path goes on", action.GuideBand == NeedleAction.Band.Good && action.Current == NeedleAction.State.Inside);
             Hold(new Vector3(0, 0, -0.08f));
             Expect("going back out of the approach starts over", action.GuideBand == NeedleAction.Band.None && !action.MessageShown);
             Hold(new Vector3(0.014f, 0, -0.01f));
@@ -544,7 +648,14 @@ public static class HapticStylusCheck
             Hold(new Vector3(0, 0, 0.03f), flags: HapticProtocol.Inkwell);
             Expect("so does going back to the dock", action.GuideBand == NeedleAction.Band.None);
             Hold(new Vector3(0, 0, 0.03f));
+            Expect("just off the dock, not yet pulled back: the card says to move the stylus back as far as it goes", action.GuideBand == NeedleAction.Band.Far && action.MessageShown && action.message.text.Contains("far as it goes"));
+            Hold(new Vector3(0, 0, -0.02f));
+            Expect("on its way back (2 cm before the entry, inside the box) it still says so", action.GuideBand == NeedleAction.Band.Far && action.MessageShown);
             Hold(new Vector3(0, 0, -0.06f)); // out of the body: the needle shows again
+            Expect("behind the box (pulled all the way back) the card goes away", action.GuideBand == NeedleAction.Band.None && !action.MessageShown);
+            Hold(new Vector3(0, 0, -0.02f));
+            Expect("and it does not come back on the way in", action.GuideBand == NeedleAction.Band.None && !action.MessageShown);
+            Hold(new Vector3(0, 0, -0.06f));
             Expect("docking had disarmed the forces", !stylus.ForcesOn);
             stylus.Inject(State(new Vector3(0, 0, -0.06f), buttons: HapticProtocol.Button2)); // arm them again
             stylus.Tick(0.02f);
@@ -588,6 +699,18 @@ public static class HapticStylusCheck
             action.guided = false;
             Hold(new Vector3(0, 0, -0.02f));
             Expect("without help mode there is no indicator and no ghost", action.GuideBand == NeedleAction.Band.None && !action.MessageShown && !action.ghost.gameObject.activeSelf);
+            // the request to move the stylus back is the same without the help mode: once after it leaves the dock
+            Hold(new Vector3(0, 0, -0.02f), flags: HapticProtocol.Inkwell);
+            Hold(new Vector3(0, 0, -0.02f));
+            Expect("without help mode, just off the dock, the card asks to move the stylus back as far as it goes", action.GuideBand == NeedleAction.Band.Far && action.MessageShown && action.message.text.Contains("far as it goes") && !action.ghost.gameObject.activeSelf);
+            Hold(new Vector3(0, 0, -0.06f));
+            Expect("and it goes away once the stylus is behind the box", action.GuideBand == NeedleAction.Band.None && !action.MessageShown);
+            Hold(new Vector3(0, 0, -0.02f));
+            Expect("and does not come back on the way in", action.GuideBand == NeedleAction.Band.None && !action.MessageShown);
+            stylus.Inject(State(new Vector3(0, 0, -0.02f), buttons: HapticProtocol.Button2)); // docking had disarmed the forces: arm them again
+            stylus.Tick(0.02f);
+            stylus.Inject(State(new Vector3(0, 0, -0.02f)));
+            stylus.Tick(0.02f);
 
             // ---- the layer tester with the stylus: the cube replaces the model, on the ideal path, and pushes back ----
             var part = Make("model part");

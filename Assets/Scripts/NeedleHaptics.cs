@@ -105,13 +105,25 @@ public class NeedleHaptics : MonoBehaviour
     }
 
     /// <summary>The needle's force along its axis (N, negative = against the advance) with the tip at this depth moving at this speed (m/s, + = in).</summary>
-    public float Force(float depth, float speed)
+    public float Force(float depth, float speed) => Force(depth, speed, Mathf.Clamp(speed / frictionSpeed, -1, 1));
+
+    /// <summary>
+    /// The formula for an even advance, as IdealCurve.py plots it (the whole depth in 60 s, the friction whole): a function of depth alone, so
+    /// the hand's speed and its tremor are not in it. Force is the same formula at the hand's real speed. The force graph's ideal curve.
+    /// </summary>
+    public float Ideal(float depth)
+    {
+        var last = layers[layers.Length - 1];
+        return Force(depth, (last.start + last.thickness) / 60, 1);
+    }
+
+    float Force(float depth, float speed, float slip) // slip: how much of the kinetic friction is on, -1..1
     {
         int i = IndexAt(depth);
         if (i < 0) return 0;
         var l = layers[i];
         float dx = depth - layers[First(i)].start;
-        float force = -(l.stiffness * dx + l.viscosity * speed) - Friction(i) * Mathf.Clamp(speed / frictionSpeed, -1, 1);
+        float force = -(l.stiffness * dx + l.viscosity * speed) - Friction(i) * slip;
         float peak = l.scaleTo > 0 ? TissuePeak(i) : 0;
         return peak > 0 ? force * l.scaleTo / peak : force;
     }

@@ -1,6 +1,5 @@
 using System;
 using UnityEngine;
-using UnityEngine.InputSystem;
 
 /// <summary>
 /// The Touch 3D Stylus holding the needle in the main scene. The stylus and the physical model are not tied to each other, so the
@@ -8,8 +7,10 @@ using UnityEngine.InputSystem;
 /// where the tip sits when the stylus is docked, and its rotation says how the device's axes lie in the model. Everything the stylus does
 /// is measured from the dock: the needle's tip is home.TransformPoint(tip - dock), and it turns with the pen. So the virtual needle meets
 /// the anatomy's colliders wherever the real stylus is on the desk.
-/// While the stylus is docked the needle rests at home (NeedleAction.parked: it goes nowhere and no force is asked), and the sticks move
-/// home: LEFT stick across the model (relative to where the user looks), RIGHT stick turns it and lifts it; it is kept between sessions.
+/// While the stylus is docked the needle rests at home (NeedleAction.parked: it goes nowhere and no force is asked). Home moves only from the
+/// menu's "Move stylus" page (LandmarkAligner calls Move / ResetHome): across the model on the pad and up / down on the height meter, in the
+/// user's frame, never out of padRange / levelRange from where it started, and only with the stylus in its inkwell or without data; it is kept
+/// between sessions.
 /// When it leaves the dock the needle stays hidden until its axis is out of the body (see NeedleAction).
 /// Button 1 does what A does on the controller (NeedleAction.Toggle: extract fluid at the target, stop; the user takes the needle out).
 /// Button 2 arms and disarms the forces, so the hand can always leave the anatomy freely: they start disarmed, and docking or losing the
@@ -30,21 +31,24 @@ public class HapticStylus : MonoBehaviour
     public float strength = 1f;       // 0..1, on every force and on the limit
     public float damping = 0.04f;     // s, time constant of the dampening of the force sent (0 = off): about 3 frames at 72 Hz
     public float moveSpeed = 0.05f;   // m/s of home at full stick
-    public float turnSpeed = 30;      // degrees/s of home at full stick
+    public float padRange = 0.15f;    // m, how far home can go from where it started, each way across the model (X and Z)
+    public float levelRange = 0.10f;  // m, the same up and down (Y)
 
     public Action onButton1;          // by default NeedleAction.Toggle, the controller's A
     public bool Live { get; private set; }   // the bridge has sent a state lately
     public bool Active => Live;              // the needle follows the stylus
     public bool Docked => Live && (_s.flags & HapticProtocol.Inkwell) != 0;
     public bool ForcesOn => _forcesOn;
+    public bool CanMove => !Live || Docked;  // out of the inkwell the needle is in the hand: moving home would drag it
     public Vector3 SentForce { get; private set; } // what went to the bridge last: the device's frame, N
     public Vector3 SentWorld { get; private set; } // the same force in the world's frame, before the device's flip (the force graph records it)
     public bool SentEnabled { get; private set; }
+    public float StateAgeMs { get; private set; }  // how old the stylus' pose was when this frame read it (ms; the force graph's CSV records it)
+    public float RoundTripMs => _link != null ? _link.RoundTripMs : 0; // command out to the state that acknowledges it (ms)
 
     readonly HapticProtocol.StateFrame _s = new();
     HapticLinkClient _link;
-    InputAction _move, _turn;
-    bool _manual, _b1, _b2, _forcesOn, _dirty;
+    bool _manual, _b1, _b2, _forcesOn, _dirty, _moving, _hasDefault;
     int _frame = -1;
     Vector3 _pending;                // the force NeedleAction asked this frame, in the world's frame
     Vector3 _damped;                 // what the dampening let through last frame (world's frame)
@@ -58,10 +62,6 @@ public class HapticStylus : MonoBehaviour
 
     void OnEnable()
     {
-        _move = new InputAction("move", binding: "<XRController>{LeftHand}/{Primary2DAxis}");
-        _turn = new InputAction("turn", binding: "<XRController>{RightHand}/{Primary2DAxis}");
-        _move.Enable();
-        _turn.Enable();
         _link = new HapticLinkClient(host, port);
     }
 
@@ -70,15 +70,12 @@ public class HapticStylus : MonoBehaviour
         Save();
         _link?.Dispose();
         _link = null;
-        _move?.Dispose();
-        _turn?.Dispose();
     }
 
     void Start()
     {
         // The builder's home is the default; what the user moved it to is kept unless the default itself has changed since.
-        _defaultPos = home.localPosition;
-        _defaultYaw = home.localEulerAngles.y;
+        Defaults();
         var json = PlayerPrefs.GetString(Key, "");
         if (json == "") return;
         var d = JsonUtility.FromJson<Saved>(json);
@@ -112,7 +109,7 @@ public class HapticStylus : MonoBehaviour
     /// <summary>The force NeedleAction wants on the stylus now, in the world's frame (N). Sent at the end of the frame, if the forces are armed.</summary>
     public void Push(Vector3 worldForce) { _pending = worldForce; }
 
-    /// <summary>One frame: the buttons, the dock, the home point. Public for the checks, which drive it.</summary>
+    /// <summary>One frame: the buttons, the dock, saving the home point. Public for the checks, which drive it.</summary>
     public void Tick(float dt)
     {
         Poll();
@@ -124,8 +121,7 @@ public class HapticStylus : MonoBehaviour
         if (!Live || Docked) _forcesOn = false; // a dropped link, or the stylus back in its inkwell, disarms the forces
 
         if (needle != null) needle.parked = Docked;
-        bool nudging = Docked && aligner != null && aligner.Idle;
-        if (nudging) Nudge(dt);
+        if (_moving) _moving = false; // Move runs from the menu each frame the stick is held: saved once it has stopped
         else if (_dirty) Save();
     }
 
@@ -164,27 +160,55 @@ public class HapticStylus : MonoBehaviour
     {
         if (_manual || Time.frameCount == _frame) return;
         _frame = Time.frameCount;
-        Live = _link != null && _link.Latest(_s, out float age) && age < 300;
+        float age = 0;
+        Live = _link != null && _link.Latest(_s, out age) && age < 300;
+        StateAgeMs = Live ? age : 0;
     }
 
-    // Home moves with the sticks, relative to where the user looks (up on the stick is away from the user), and turns about its own point.
-    void Nudge(float dt)
+    // Where home started (the builder's, or the default the saved one was made against), taken once: before Start in the Editor's checks.
+    void Defaults()
     {
-        var cam = Camera.main;
-        if (cam == null) return;
-        var fwd = Vector3.ProjectOnPlane(cam.transform.forward, Vector3.up);
-        if (fwd.sqrMagnitude < 0.01f) return; // looking straight up or down
-        fwd.Normalize();
-        var right = Vector3.Cross(Vector3.up, fwd);
-        Vector2 m = Curve(_move.ReadValue<Vector2>()), r = Curve(_turn.ReadValue<Vector2>());
-        if (m == Vector2.zero && r == Vector2.zero) return;
-        home.position += (right * m.x + fwd * m.y + Vector3.up * r.y) * (moveSpeed * dt);
-        home.Rotate(Vector3.up, r.x * turnSpeed * dt, Space.World);
-        _dirty = true;
+        if (_hasDefault) return;
+        _hasDefault = true;
+        _defaultPos = home.localPosition;
+        _defaultYaw = home.localEulerAngles.y;
     }
 
-    // Dead zone, then quadratic: a small flick is a slow, fine correction.
-    static Vector2 Curve(Vector2 v) => v.magnitude < 0.15f ? Vector2.zero : v * v.magnitude;
+    Vector3 StartWorld => home.parent != null ? home.parent.TransformPoint(_defaultPos) : _defaultPos;
+
+    /// <summary>How far home is from where it started in the user's frame (right and forward are horizontal, perpendicular, unit): x to their right, y up, z away from them (m).</summary>
+    public Vector3 Shift(Vector3 right, Vector3 forward)
+    {
+        Defaults();
+        var o = home.position - StartWorld;
+        return new Vector3(Vector3.Dot(o, right), o.y, Vector3.Dot(o, forward));
+    }
+
+    /// <summary>
+    /// Moves home across the model by `across` (x right, y away from the user) and up by `lift` (m), in the user's frame. Across is the XZ
+    /// plane and lift the Y axis, each held within padRange / levelRange of where home started. Nothing moves, and it says so, with the stylus
+    /// out of its inkwell.
+    /// </summary>
+    public bool Move(Vector2 across, float lift, Vector3 right, Vector3 forward)
+    {
+        if (!CanMove) return false;
+        var s = Shift(right, forward);
+        float x = Mathf.Clamp(s.x + across.x, -padRange, padRange), y = Mathf.Clamp(s.y + lift, -levelRange, levelRange), z = Mathf.Clamp(s.z + across.y, -padRange, padRange);
+        home.position = StartWorld + right * x + Vector3.up * y + forward * z;
+        _moving = _dirty = true;
+        return true;
+    }
+
+    /// <summary>Home back to where it started (and as it was turned). False, and nothing moves, with the stylus out of its inkwell.</summary>
+    public bool ResetHome()
+    {
+        if (!CanMove) return false;
+        Defaults();
+        home.localPosition = _defaultPos;
+        home.localRotation = Quaternion.Euler(0, _defaultYaw, 0);
+        _dirty = true;
+        return true;
+    }
 
     void Save()
     {

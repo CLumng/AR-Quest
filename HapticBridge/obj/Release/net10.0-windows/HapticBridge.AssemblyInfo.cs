@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("HapticBridge")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+c08ec0ed72fdad63efc4f69f0d3650a3cfb0de9f")]
 [assembly: System.Reflection.AssemblyProductAttribute("HapticBridge")]
 [assembly: System.Reflection.AssemblyTitleAttribute("HapticBridge")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

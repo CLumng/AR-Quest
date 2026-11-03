@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -64,6 +65,15 @@ public static class HapticLinkCheck
         r = new BinaryReader(ms);
         var savedFrame = new HapticProtocol.SavedFrame();
         Expect("a saved frame starts with its type and comes back the same", r.ReadByte() == HapticProtocol.SavedType && Read(savedFrame, r) && savedFrame.id == 42 && savedFrame.name == "run-20261021-123456.csv");
+        ms = new MemoryStream();
+        new HapticProtocol.PerfFrame { fps = 88.5f, frameMs = 11.3f, maxMs = 14.2f, refreshHz = 90, late = 2 }.Write(new BinaryWriter(ms));
+        Expect("a perf frame is PerfSize bytes", ms.Length == HapticProtocol.PerfSize);
+        ms.Position = 0;
+        r = new BinaryReader(ms);
+        var perfFrame = new HapticProtocol.PerfFrame();
+        bool perfType = r.ReadByte() == HapticProtocol.PerfType;
+        perfFrame.Read(r);
+        Expect("it starts with its type and comes back the same", perfType && perfFrame.fps == 88.5f && perfFrame.frameMs == 11.3f && perfFrame.maxMs == 14.2f && perfFrame.refreshHz == 90 && perfFrame.late == 2 && ms.Position == ms.Length);
 
         // the device's frame to Unity's
         var host = new GameObject("HapticLinkCheck");
@@ -94,7 +104,7 @@ public static class HapticLinkCheck
         // a bridge that does not know runs (an old build) drops the link at each one: the headset gives up after MaxRunTries
         var stub = new TcpListener(IPAddress.Loopback, Port + 1);
         stub.Start();
-        int runFrames = 0;
+        int runFrames = 0, perfFrames = 0;
         new Thread(() =>
         {
             try
@@ -107,6 +117,7 @@ public static class HapticLinkCheck
                     {
                         if (t == HapticProtocol.CommandType) { rd.ReadBytes(HapticProtocol.CommandSize - 1); continue; }
                         if (t == HapticProtocol.RunType) runFrames++;
+                        if (t == HapticProtocol.PerfType) perfFrames++;
                         break; // anything but a command: the old bridge closes the link
                     }
                 }
@@ -117,8 +128,10 @@ public static class HapticLinkCheck
         try
         {
             oldBridge.SendRun(1, "time_s\r\n0.02\r\n");
+            oldBridge.SendPerf(new HapticProtocol.PerfFrame { fps = 90 });
             Thread.Sleep(5500); // each retry waits the client's second to reconnect
             Expect($"a bridge that drops the link at a run gets it {runFrames} times, and the headset gives up", runFrames == HapticLinkClient.MaxRunTries && !oldBridge.RunSaved(1, out _));
+            Expect("a bridge that does not say it takes performance frames is never sent one", perfFrames == 0);
         }
         finally
         {
@@ -135,7 +148,9 @@ public static class HapticLinkCheck
             return report.Append("1 failed").ToString();
         }
         string runs = Path.Combine(Path.GetTempPath(), "HapticLinkCheck-" + System.Guid.NewGuid().ToString("N")); // where the bridge saves the runs of this check
-        var bridge = Process.Start(new ProcessStartInfo(exe, $"--headless --sim --no-adb --port {Port} --max-force 1 --tau 5 --runs-dir \"{runs}\"") { UseShellExecute = false, CreateNoWindow = true });
+        string perf = runs + "-perf"; // ... and its performance log
+        string sensors = Path.GetFullPath(Path.Combine(Application.dataPath, "..", "HapticBridge", "tests", "quest3-sensors.txt")); // a real Quest 3 reading, in place of adb
+        var bridge = Process.Start(new ProcessStartInfo(exe, $"--headless --sim --no-adb --port {Port} --max-force 1 --tau 5 --runs-dir \"{runs}\" --perf-dir \"{perf}\" --sensors-file \"{sensors}\"") { UseShellExecute = false, CreateNoWindow = true });
         HapticLinkClient link = null;
         try
         {
@@ -153,6 +168,18 @@ public static class HapticLinkCheck
             Thread.Sleep(500);
             link.Latest(s, out _);
             Expect("and it moves", Vector2.Distance(at0, new Vector2(s.m[12], s.m[13])) > 2);
+
+            Expect("the bridge says it takes performance frames", (s.flags & HapticProtocol.PerfOk) != 0);
+            link.SendPerf(new HapticProtocol.PerfFrame { fps = 88.5f, frameMs = 11.3f, maxMs = 14.2f, refreshHz = 90, late = 2 });
+            string[] logged = null;
+            bool inLog = Wait(() => (logged = PerfLines(perf)).Length > 1 && logged[logged.Length - 1].Split(';')[2] == "1", 4000);
+            string[] head = logged.Length > 0 ? logged[0].Split(';') : new string[0], row = logged.Length > 1 ? logged[logged.Length - 1].Split(';') : new string[0];
+            Expect("the performance log has a header and a row carrying the app's numbers", inLog && head.Length == 25 && head[0] == "time" && head[3] == "fps" && row.Length == head.Length);
+            Expect($"the row has the app's second (fps {row.ElementAtOrDefault(3)}, frame {row.ElementAtOrDefault(4)} ms, max {row.ElementAtOrDefault(5)}, late {row.ElementAtOrDefault(6)}, {row.ElementAtOrDefault(7)} Hz)",
+                row.Length == 25 && row[3] == "88.5" && row[4] == "11.30" && row[5] == "14.20" && row[6] == "2" && row[7] == "90");
+            Expect($"and the sensors (CPU {row.ElementAtOrDefault(8)}, battery {row.ElementAtOrDefault(16)}, virtual {row.ElementAtOrDefault(17)}, charging {row.ElementAtOrDefault(24)})",
+                row.Length == 25 && row[8] == "40.6" && row[16] == "37.0" && row[17] == "39.3" && row[18] == "0" && row[24] == "1");
+            Expect("with a decimal point, never a comma", inLog && !logged[logged.Length - 1].Contains(','));
 
             Expect("no force is applied before one is asked", Mathf.Abs(s.fx) + Mathf.Abs(s.fy) + Mathf.Abs(s.fz) < 1e-4f && (s.flags & HapticProtocol.ForceOn) == 0);
             link.SetForce(5, 0, 0, true);
@@ -197,12 +224,24 @@ public static class HapticLinkCheck
             if (!bridge.HasExited) bridge.Kill();
             bridge.Dispose();
             if (Directory.Exists(runs)) Directory.Delete(runs, true);
+            if (Directory.Exists(perf)) Directory.Delete(perf, true);
         }
         report.Append(failed == 0 ? "all passed" : $"{failed} failed");
         return report.ToString();
     }
 
     static bool Read(HapticProtocol.SavedFrame frame, BinaryReader r) { frame.Read(r); return true; }
+
+    // The lines of the performance log (the bridge appends to it, so a read can collide with a write: that is an empty answer, asked again).
+    static string[] PerfLines(string dir)
+    {
+        try
+        {
+            var files = Directory.Exists(dir) ? Directory.GetFiles(dir, "perf-*.csv") : new string[0];
+            return files.Length == 1 ? File.ReadAllLines(files[0]) : new string[0];
+        }
+        catch (IOException) { return new string[0]; }
+    }
 
     static bool Wait(System.Func<bool> done, int ms)
     {

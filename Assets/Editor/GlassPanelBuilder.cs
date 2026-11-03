@@ -17,6 +17,7 @@ public static class GlassPanelBuilder
     const float Width = 900;      // canvas units are millimetres: the canvas is scaled 0.001, so this is a 0.9 m panel
     const float WideWidth = 1200; // the card of a page with two columns
     const float CompactWidth = 600, Padding = 34;
+    const float PadSize = 340;    // the stylus pad: a square plane, in canvas units
     const float Top = 0.42f;      // the panel's top edge above the rig, in metres
     const float MessageScale = 0.0007f; // the needle's message: its title (40 units) is 2.8 cm tall; it is read from about half a metre
     const int Radius = 28;
@@ -27,6 +28,7 @@ public static class GlassPanelBuilder
     static readonly Color Primary = new(0.945f, 0.957f, 0.973f), Secondary = new(0.84f, 0.87f, 0.90f), Muted = new(0.60f, 0.64f, 0.70f);
     static readonly Color Accent = new(1f, 0.83f, 0f), Info = new(0.62f, 0.83f, 1f), Track = new(0.23f, 0.27f, 0.31f);
     static readonly Color Selected = new(1f, 0.83f, 0f, 0.16f), KeyBg = new(0.18f, 0.22f, 0.27f);
+    static readonly Color PadBg = new(0.10f, 0.13f, 0.17f, 0.95f), PadGrid = new(1, 1, 1, 0.08f), PadAxis = new(0.62f, 0.83f, 1f, 0.45f);
 
     [MenuItem("Tools/Model Target/Build Glass Panel")]
     static void Menu()
@@ -290,6 +292,29 @@ public static class GlassPanelBuilder
 
         view.body = kit.Label("Body", root, 34, Primary, FontStyles.Normal, TextAlignmentOptions.TopLeft, true);
 
+        // the stylus pad ("Move stylus"): a square cartesian plane with its axes and a dot (GlassPanel moves the dot), centred under the text
+        var padRow = kit.Node("PadRow", root);
+        Kit.Row(padRow, 0, 0, 0, TextAnchor.MiddleCenter);
+        var pad = kit.Pic("Pad", padRow, kit.round, PadBg);
+        Kit.Elem(pad, prefW: PadSize, prefH: PadSize);
+        foreach (float f in new[] { 0.25f, 0.75f }) // the quarter lines, then the axes through the middle
+        {
+            Line(kit, pad, true, f, 1, PadGrid);
+            Line(kit, pad, false, f, 1, PadGrid);
+        }
+        Line(kit, pad, true, 0.5f, 2, PadAxis);
+        Line(kit, pad, false, 0.5f, 2, PadAxis);
+        AxisLabel(kit, pad, "+X", new Vector2(1, 0.5f), new Vector2(-34, 18)); // the axes' positive ends: the user's right, away from the user
+        AxisLabel(kit, pad, "+Z", new Vector2(0.5f, 1), new Vector2(26, -22));
+        var dot = kit.Pic("Dot", pad.transform, kit.pill, Accent, false);
+        dot.rectTransform.sizeDelta = new Vector2(30, 30);
+        var padEdge = kit.Pic("Edge", pad.transform, kit.ring, Border);
+        Kit.Stretch(padEdge.rectTransform);
+        view.padRoot = padRow.gameObject;
+        view.padDot = dot.rectTransform;
+        view.padDotImage = dot;
+        padRow.gameObject.SetActive(false);
+
         // menu rows
         var rows = Kit.Stack(kit.Node("Rows", root));
         view.rowsRoot = rows.gameObject;
@@ -326,6 +351,25 @@ public static class GlassPanelBuilder
 
         view.Show(new PanelModel()); // nothing on: a clean state to save
         return (root.gameObject, view);
+    }
+
+    // A line across the pad at a fraction of its width (vertical) or height (horizontal), `thick` units wide, stopping short of the rounded corners.
+    static void Line(Kit kit, Component pad, bool horizontal, float at, float thick, Color color)
+    {
+        var rt = kit.Pic(horizontal ? "LineX" : "LineY", pad.transform, null, color, false).rectTransform;
+        rt.anchorMin = horizontal ? new Vector2(0, at) : new Vector2(at, 0);
+        rt.anchorMax = horizontal ? new Vector2(1, at) : new Vector2(at, 1);
+        rt.offsetMin = horizontal ? new Vector2(16, -thick / 2) : new Vector2(-thick / 2, 16);
+        rt.offsetMax = horizontal ? new Vector2(-16, thick / 2) : new Vector2(thick / 2, -16);
+    }
+
+    static void AxisLabel(Kit kit, Component pad, string text, Vector2 anchor, Vector2 offset)
+    {
+        var label = kit.Label("Axis " + text, pad.transform, 24, Muted, FontStyles.Bold, TextAlignmentOptions.Center);
+        label.text = text;
+        label.rectTransform.anchorMin = label.rectTransform.anchorMax = anchor;
+        label.rectTransform.sizeDelta = new Vector2(48, 30);
+        label.rectTransform.anchoredPosition = offset;
     }
 
     // label on the left; on the right a slider (bar + percentage) or a toggle switch, whichever the row needs

@@ -9,7 +9,9 @@ using UnityEngine.InputSystem;
 /// opens a menu (thumbstick moves, TRIGGER or A selects, B goes back one page, and closes the menu from the main one) to fade the
 /// soft tissue (the slider row: thumbstick left / right), test the layers or show/hide parts of the model.
 /// "Settings" opens a second page: calibrate again, adjust by eye, the size of the cards, the size of their text and their opacity
-/// (GlassSettings, kept between sessions), and the stylus' help mode and force strength. "Layer tester" lists the layers in two columns.
+/// (GlassSettings, kept between sessions), and the stylus' help mode, force strength and "Move stylus": a page with a cartesian pad (the left
+/// stick moves the needle's home point across the model) and a height meter (the right stick on its row), and a reset to home. That page is the
+/// only place the stylus' home moves. "Layer tester" lists the layers in two columns.
 /// Adjust: the left thumbstick moves the model, the right one turns it and lifts it, all by eye against the passthrough.
 /// While recalibrating or adjusting, GRIP or B cancels and brings back the previous pose. All UI text is English.
 /// </summary>
@@ -50,7 +52,7 @@ public class LandmarkAligner : MonoBehaviour
     Step _step;
     int _index, _worst;
     int _sel;               // menu selection, counting only the rows that can be selected (not the headers): see Describe for what each page has
-    int _page;              // menu page: 0 = the main menu, 1 = settings (calibrate, adjust, size / text size / opacity of the cards, reset, stylus help mode and force strength; B goes back), 2 = layer tester (row 0 = back, then one row per layer, in two columns)
+    int _page;              // menu page: 0 = the main menu, 1 = settings (calibrate, adjust, size / text size / opacity of the cards, reset, stylus help mode, force strength and move stylus; B goes back), 2 = layer tester (row 0 = back, then one row per layer, in two columns), 3 = move stylus (back, reset to home, height; under settings)
     bool _stickLatched;     // one thumbstick flick moves the selection one step
     bool _sideLatched;      // the same for left / right between the two columns
     float _hintUntil;       // how long the "model locked" hint stays on screen
@@ -58,6 +60,7 @@ public class LandmarkAligner : MonoBehaviour
     Vector3[] _touched;
     float _rms;
     float[] _residuals;
+    Pose _fitPose;          // the pose the last landmark fit gave the model
     readonly PanelModel _model = new();
     Vector3 _dir = Vector3.forward; // flat direction from the head to the panel
     Camera _cam;
@@ -69,8 +72,20 @@ public class LandmarkAligner : MonoBehaviour
     // The white ball is the pointer, so the needle is hidden.
     bool Pointing => Aligning;
 
-    /// <summary>The model is locked and the menu is closed: the sticks are free (the stylus uses them to move its home point).</summary>
-    public bool Idle => _step == Step.Done;
+    /// <summary>
+    /// The registration of the last landmark fit, for the run's CSV: the residual of each landmark (m), and how far the model has been moved
+    /// from the pose the fit gave it since (m, degrees: the manual adjustment and the silhouette refinement do that, and then the residuals no
+    /// longer describe where the model is). False until there has been a fit.
+    /// </summary>
+    public bool Registration(out float[] residuals, out float moved, out float turned)
+    {
+        residuals = _residuals;
+        moved = turned = 0;
+        if (_residuals == null) return false;
+        moved = (model.transform.position - _fitPose.position).magnitude;
+        turned = Quaternion.Angle(model.transform.rotation, _fitPose.rotation);
+        return true;
+    }
 
     void OnEnable() { _pos.Enable(); _rot.Enable(); _tracked.Enable(); _confirm.Enable(); _accept.Enable(); _back.Enable(); _menu.Enable(); _stick.Enable(); _moveStick.Enable(); }
     void OnDisable() { _pos.Disable(); _rot.Disable(); _tracked.Disable(); _confirm.Disable(); _accept.Disable(); _back.Disable(); _menu.Disable(); _stick.Disable(); _moveStick.Disable(); }
@@ -150,6 +165,7 @@ public class LandmarkAligner : MonoBehaviour
                     else if (_page == 1 && _sel == 3) GlassSettings.TextSizeT += slide;
                     else if (_page == 1 && _sel == 4) GlassSettings.OpacityT += slide;
                     else if (_page == 1 && _sel == 7 && stylus != null) stylus.strength = Mathf.Clamp01(stylus.strength + slide);
+                    if (_page == 3) MoveStylus(stick, Time.deltaTime);
                 }
                 break;
         }
@@ -236,6 +252,12 @@ public class LandmarkAligner : MonoBehaviour
             else if (_sel == 1) Go(Step.Adjust);
             else if (_sel == 5) GlassSettings.Reset();
             else if (_sel == 6) Action.guided = !Action.guided;
+            else if (_sel == 8) { _page = 3; _sel = 0; }
+        }
+        else if (_page == 3)
+        {
+            if (_sel == 0) MenuBack();
+            else if (_sel == 1 && stylus != null) stylus.ResetHome();
         }
         else if (_page == 0)
         {
@@ -249,6 +271,7 @@ public class LandmarkAligner : MonoBehaviour
     void MenuBack()
     {
         if (_page == 0) { Go(Step.Done); return; }
+        if (_page == 3) { _page = 1; _sel = 8; return; } // the stylus' page is under Settings, on its last row
         _sel = _page == 1 ? 0 : 2; // settings is the main menu's first row, the layer tester its third
         _page = 0;
     }
@@ -261,7 +284,7 @@ public class LandmarkAligner : MonoBehaviour
         else if (!_stickLatched && Mathf.Abs(stick.y) > 0.6f)
         {
             _stickLatched = true;
-            int n = _page == 1 ? 8 : _page == 2 ? tester.Count + 1 : model.groups.Length + Actions;
+            int n = _page == 1 ? 9 : _page == 2 ? tester.Count + 1 : _page == 3 ? 3 : model.groups.Length + Actions;
             _sel = (_sel + (stick.y < 0 ? 1 : n - 1)) % n;
         }
 
@@ -275,6 +298,25 @@ public class LandmarkAligner : MonoBehaviour
         }
     }
 
+    // The user's axes on the stylus' page: the panel faces the user, so away from it is "up" on the pad and the stick's up.
+    void Axes(out Vector3 right, out Vector3 forward)
+    {
+        forward = Vector3.ProjectOnPlane(rig.forward, Vector3.up);
+        forward = forward.sqrMagnitude < 1e-4f ? Vector3.forward : forward.normalized;
+        right = Vector3.Cross(Vector3.up, forward);
+    }
+
+    // "Move stylus": the left stick moves the stylus' home across the model (the pad); the right stick left / right lifts or lowers it when the Height row is selected.
+    void MoveStylus(Vector2 stick, float dt)
+    {
+        if (stylus == null) return;
+        float k = stylus.moveSpeed * dt, lift = _sel == 2 ? Curve(new Vector2(stick.x, 0)).x : 0;
+        Vector2 across = Curve(_moveStick.ReadValue<Vector2>());
+        if (across == Vector2.zero && lift == 0) return;
+        Axes(out var right, out var forward);
+        stylus.Move(across * k, lift * k, right, forward);
+    }
+
     void Fit()
     {
         var local = new Vector3[_touched.Length];
@@ -282,6 +324,7 @@ public class LandmarkAligner : MonoBehaviour
             local[i] = model.transform.InverseTransformPoint(model.landmarks[i].point.position);
         var pose = RigidAlign.Solve(local, _touched, out _rms, out _residuals);
         _worst = System.Array.IndexOf(_residuals, Mathf.Max(_residuals));
+        _fitPose = pose;
         model.transform.SetPositionAndRotation(pose.position, pose.rotation);
         model.transform.localScale = Vector3.one;
         Go(Step.Review);
@@ -361,7 +404,7 @@ public class LandmarkAligner : MonoBehaviour
                     {
                         m.badge = "Stylus: In the inkwell";
                         m.badgeColor = new Color(1f, 0.83f, 0f);
-                        m.body = "The needle rests at its home point. With the menu closed the sticks move it: left across the model, right turns and lifts it. Then take the stylus out.";
+                        m.body = "The needle rests at its home point. Place it with Move stylus below, then take the stylus out.";
                     }
                     else
                     {
@@ -381,6 +424,28 @@ public class LandmarkAligner : MonoBehaviour
                     m.Add(PanelModel.Kind.Toggle, "Help mode", _sel == 6, Action.guided);
                     float strength = stylus != null ? stylus.strength : 1;
                     m.Add(PanelModel.Kind.Slider, "Force strength", _sel == 7, value: strength, valueText: Percent(strength));
+                    m.Add(PanelModel.Kind.Action, "Move stylus", _sel == 8, valueText: ">");
+                }
+                else if (_page == 3)
+                {
+                    // the stylus' home against where it started, in the user's frame: the pad shows X (right) and Z (away), the meter Y (up), the middle is home
+                    bool can = stylus != null && stylus.CanMove;
+                    Axes(out var right, out var forward);
+                    var shift = stylus != null ? stylus.Shift(right, forward) : Vector3.zero;
+                    float across = stylus != null ? stylus.padRange : 1, level = stylus != null ? stylus.levelRange : 1;
+                    string signed(float v) => (v * 1000).ToString("+0;-0;0", CultureInfo.InvariantCulture);
+                    m.title = "Move stylus";
+                    m.badge = can ? $"X {signed(shift.x)}   Z {signed(shift.z)}   Y {signed(shift.y)} mm" : "Stylus out of its inkwell";
+                    m.badgeColor = can ? new Color(0.55f, 0.85f, 1f) : new Color(1f, 0.83f, 0f);
+                    m.body = can ? "The LEFT stick moves the needle's home point across the model, seen from where you stand: the dot is where it is. On Height, push the right stick left or right to lift or lower it."
+                        : "Put the stylus back in its inkwell to move it.";
+                    m.pad = true;
+                    m.padOn = can;
+                    m.padPos = new Vector2(shift.x / across, shift.z / across);
+                    m.Add(PanelModel.Kind.Action, "Back", _sel == 0);
+                    m.Add(PanelModel.Kind.Action, "Reset to home", _sel == 1);
+                    m.Add(PanelModel.Kind.Slider, "Height (cm)", _sel == 2, value: 0.5f + shift.y / (2 * level), valueText: (shift.y * 100).ToString("+0.0;-0.0;0.0", CultureInfo.InvariantCulture));
+                    if (can) m.Hint("LEFT STICK", "Move");
                 }
                 else if (_page == 2)
                 {

@@ -33,6 +33,11 @@ public sealed class HapticLinkClient : IDisposable
     int _runTries;                          // ... at most MaxRunTries times: a bridge that does not know runs (an old build) drops the link at each one
     long _rxCount, _countFrom;
     volatile float _rtt, _rate;
+    readonly HapticProtocol.PerfFrame _perf = new();
+    bool _perfPending;                      // a PerfFrame waiting to go out (one second of the app's performance)
+
+    /// <summary>The newest client that is still alive, so the performance probe can send through whichever scene made one.</summary>
+    public static HapticLinkClient Current { get; private set; }
 
     public bool Connected { get; private set; }
     public float RoundTripMs => _rtt;       // command out to the state that acknowledges it: includes the bridge's 8 ms send period
@@ -46,6 +51,7 @@ public sealed class HapticLinkClient : IDisposable
         _writer = new Thread(Write) { IsBackground = true, Name = "HapticLink write" };
         _reader.Start();
         _writer.Start();
+        Current = this;
     }
 
     /// <summary>Copies the latest state into "into"; false if none has arrived yet. ageMs = how old it is.</summary>
@@ -74,6 +80,15 @@ public sealed class HapticLinkClient : IDisposable
     public void SendRun(long id, string csv)
     {
         lock (_lock) { _runId = id; _runCsv = csv; _runSent = false; _runTries = 0; }
+    }
+
+    /// <summary>
+    /// One second of the app's performance, for the bridge to show and log. It goes out with the next command, and only to a bridge that
+    /// says it takes them (PerfOk): an old one drops the link at a frame it does not know. A newer sample replaces one not sent yet.
+    /// </summary>
+    public void SendPerf(HapticProtocol.PerfFrame frame)
+    {
+        lock (_lock) { _perf.CopyFrom(frame); _perfPending = true; }
     }
 
     /// <summary>True once the PC has saved the run `id`; `name` is its file there.</summary>
@@ -139,12 +154,14 @@ public sealed class HapticLinkClient : IDisposable
         var ms = new MemoryStream(HapticProtocol.CommandSize);
         var w = new BinaryWriter(ms);
         var cmd = new HapticProtocol.CommandFrame();
+        var perf = new HapticProtocol.PerfFrame();
         while (!_stop)
         {
             Thread.Sleep(SendIntervalMs);
             NetworkStream stream;
             string csv = null;
             long runId = 0;
+            bool sendPerf = false;
             lock (_lock)
             {
                 stream = _stream;
@@ -154,11 +171,13 @@ public sealed class HapticLinkClient : IDisposable
                 cmd.fx = _fx; cmd.fy = _fy; cmd.fz = _fz;
                 _sent[cmd.seq % 256] = Stopwatch.GetTimestamp();
                 if (_runCsv != null && !_runSent && _runTries < MaxRunTries) { csv = _runCsv; runId = _runId; }
+                if (_perfPending && (_state.flags & HapticProtocol.PerfOk) != 0) { perf.CopyFrom(_perf); sendPerf = true; _perfPending = false; }
             }
             try
             {
                 ms.SetLength(0);
                 cmd.Write(w);
+                if (sendPerf) perf.Write(w);
                 stream.Write(ms.GetBuffer(), 0, (int)ms.Length);
                 if (csv != null)
                 {
@@ -180,6 +199,7 @@ public sealed class HapticLinkClient : IDisposable
         {
             client = _client;
             _client = null; _stream = null; _lastRx = 0;
+            _state.flags = 0; // what the bridge could do is learned again from the next one
             _runSent = false; // a run not yet answered goes again on the next connection
             Array.Clear(_sent, 0, _sent.Length);
         }
@@ -190,6 +210,7 @@ public sealed class HapticLinkClient : IDisposable
     public void Dispose()
     {
         _stop = true;
+        if (Current == this) Current = null;
         SetForce(0, 0, 0, false);
         Drop();
     }
