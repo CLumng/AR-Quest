@@ -35,7 +35,7 @@ The project started as a test of whether something like a Vuforia *model target*
 | `Assets/Scenes/` | `ModelTargetTest` (the app, first in Build Settings), `HapticLinkTest` (link test, disabled), `SampleScene` |
 | `Assets/Geometry/` | `Anatomy.prefab` (lumbar spine + pelvis, ~30×22×14 cm), tissue meshes and `spinalNeedle1.fbx` |
 | `HapticBridge/` | PC bridge: `Bridge.cs` (engine: Touch through `hd.dll`, TCP server, sensors, CSV) and `HapticBridge.pyw` (tkinter window) |
-| `Python/` | `IdealCurve.py` (ideal force curve and Unity's), `Characterization.py` (run analysis) |
+| `Graphs/` | `IdealCurve.py` (ideal force curve and Unity's), `Characterization.py` (run analysis) |
 | `Docs/CSV_y_graficas.md` | How each CSV variable is obtained and what each axis of each graph is (**in Spanish**) |
 
 ## 3. Requirements
